@@ -1,0 +1,8 @@
+# Azure Functions runtime
+azure-functions
+
+# Azure Identity for Managed Identity authentication
+azure-identity>=1.15.0
+
+# Microsoft Graph SDK for Python
+msgraph-sdk>=1.0.0
