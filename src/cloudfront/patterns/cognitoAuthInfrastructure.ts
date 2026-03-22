@@ -5,12 +5,12 @@ import {
   aws_lambda as lambda,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
-import { CognitoAuthSecretManager } from '../auth/cognito-auth-secret-manager';
-import { AuthLambdaFunctions } from '../auth/auth-lambda-functions';
-import { AuthSecurityTable } from '../auth-security-table';
-import { AuditLogArchive } from '../logging/audit-log-archive';
-import { SsmCrossRegionWriter } from '../ssm-cross-region-writer';
-import { AppSpec } from './auth-infrastructure';
+import { CognitoAuthSecretManager } from '../auth/cognitoAuthSecretManager';
+import { AuthLambdaFunctions } from '../auth/authLambdaFunctions';
+import { AuthSecurityTable } from '../authSecurityTable';
+import { AuditLogArchive } from '../logging/auditLogArchive';
+import { SsmCrossRegionWriter } from '../ssmCrossRegionWriter';
+import { AppSpec } from './authInfrastructure';
 
 export interface CognitoAuthInfrastructureProps {
   readonly ssmParamPrefix?: string;

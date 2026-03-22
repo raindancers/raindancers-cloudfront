@@ -1,17 +1,19 @@
-import { awscdk } from 'projen';
-const project = new awscdk.AwsCdkConstructLibrary({
-  author: 'Andrew Frazer',
-  authorAddress: 'mrpackethead@users.noreply.github.com',
-  cdkVersion: '2.244.0',
+import { typescript } from 'projen';
+const project = new typescript.TypeScriptProject({
+  authorName: 'Andrew Frazer',
+  authorEmail: 'mrpackethead@users.noreply.github.com',
   defaultReleaseBranch: 'main',
-  jsiiVersion: '~5.9.0',
   name: 'raindancers-cloudfront',
   projenrcTs: true,
-  repositoryUrl: 'https://github.com/raindancers/raindancers-cloudfront',
-
-  // deps: [],                /* Runtime dependencies of this module. */
-  // description: undefined,  /* The description is just a string that helps people understand the purpose of the package. */
-  // devDeps: [],             /* Build dependencies for this module. */
-  // packageName: undefined,  /* The "name" in package.json. */
+  repository: 'https://github.com/raindancers/raindancers-cloudfront',
+  releaseToNpm: true,
+  peerDeps: [
+    'aws-cdk-lib@^2.244.0',
+    'constructs@^10.5.0',
+  ],
+  devDeps: [
+    'aws-cdk-lib@2.244.0',
+    'constructs@10.5.0',
+  ],
 });
 project.synth();

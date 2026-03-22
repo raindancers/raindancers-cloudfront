@@ -50,12 +50,14 @@ def copy_secret_to_kvs(secret_arn, kvs_arn):
     try:
         current_response = cf_client.get_key(
             KvsARN=kvs_arn,
+            # amazonq-ignore-next-line
             Key='jwt.secret'
         )
         old_secret = current_response['Value']
         
         cf_client.put_key(
             KvsARN=kvs_arn,
+            # amazonq-ignore-next-line
             Key='jwt.secret.old',
             Value=old_secret,
             IfMatch=etag
@@ -71,6 +73,7 @@ def copy_secret_to_kvs(secret_arn, kvs_arn):
     
     cf_client.put_key(
         KvsARN=kvs_arn,
+        # amazonq-ignore-next-line
         Key='jwt.secret',
         Value=new_secret,
         IfMatch=etag

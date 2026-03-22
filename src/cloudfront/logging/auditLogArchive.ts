@@ -29,7 +29,6 @@ export class AuditLogArchive extends constructs.Construct {
   constructor(scope: constructs.Construct, id: string, props: AuditLogArchiveProps) {
     super(scope, id);
 
-    const retentionDays = props.retentionDays ?? 30;
     const archiveRetentionDays = props.archiveRetentionDays ?? 365;
     const databaseName = props.databaseName ?? 'audit_logs';
     const tableName = 'logs';

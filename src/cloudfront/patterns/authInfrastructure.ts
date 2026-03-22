@@ -3,11 +3,11 @@ import {
   aws_iam as iam,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
-import { AuthSecretManager } from '../auth/auth-secret-manager';
-import { AuthLambdaFunctions } from '../auth/auth-lambda-functions';
-import { AuthSecurityTable } from '../auth-security-table';
-import { AuditLogArchive } from '../logging/audit-log-archive';
-import { SsmCrossRegionWriter } from '../ssm-cross-region-writer';
+import { AuthSecretManager } from '../auth/authSecretManager';
+import { AuthLambdaFunctions } from '../auth/authLambdaFunctions';
+import { AuthSecurityTable } from '../authSecurityTable';
+import { AuditLogArchive } from '../logging/auditLogArchive';
+import { SsmCrossRegionWriter } from '../ssmCrossRegionWriter';
 
 const AZURE_RESERVED_WORDS = [
   'admin', 'administrator', 'root', 'sys', 'system', 'guest', 'public',
