@@ -121,10 +121,6 @@ This command:
 
 The main `setup.sh` orchestrates the following individual setup scripts:
 
-#### 1. NPM Setup (`scripts/npm-setup.sh`)
-- Configures NPM for GitHub packages
-- Sets up authentication token for `@tepapaatawhai` scope
-- Creates `.npmrc` configuration
 
 #### 2. Dependencies Installation (`scripts/install-deps.sh`)
 - Runs `yarn install` to install project dependencies
