@@ -34,8 +34,8 @@ export interface BicepResource {
   properties?: Record<string, any>;
   dependsOn?: string[];
   comment?: string;
-  linterSuppressions?: string[];  // Bicep linter rule codes to suppress for the resource declaration
-  propertySuppressions?: Record<string, string[]>;  // Property name -> linter codes to suppress
+  linterSuppressions?: string[]; // Bicep linter rule codes to suppress for the resource declaration
+  propertySuppressions?: Record<string, string[]>; // Property name -> linter codes to suppress
   [key: string]: any;
 }
 

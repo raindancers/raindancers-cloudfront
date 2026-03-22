@@ -1,6 +1,6 @@
+import { LogAnalyticsWorkspace } from './logAnalyticsWorkspace';
 import { BicepTemplate } from '../../deploy/template';
 import { BicepConstruct } from '../graph/bicepConstruct';
-import { LogAnalyticsWorkspace } from './logAnalyticsWorkspace';
 
 export interface ApplicationInsightsProps {
   readonly name: string;

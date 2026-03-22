@@ -1,6 +1,6 @@
+import { ManagedIdentity } from './managedIdentity';
 import { BicepTemplate } from '../../deploy/template';
 import { BicepConstruct } from '../graph/bicepConstruct';
-import { ManagedIdentity } from './managedIdentity';
 
 // Well-known Azure built-in role definition IDs
 export const AzureBuiltInRole = {
@@ -32,7 +32,7 @@ export class RoleAssignment extends BicepConstruct {
       properties: {
         roleDefinitionId: `subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '${this.props.roleDefinitionId}')`,
         principalId: principalId,
-        principalType: `'ServicePrincipal'`,
+        principalType: '\'ServicePrincipal\'',
       },
       dependsOn: this.explicitDependencies.length > 0 ? this.explicitDependencies : undefined,
     });

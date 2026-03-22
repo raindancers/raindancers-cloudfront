@@ -9,8 +9,8 @@ import {
   aws_ssm as ssm,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
-import { FunctionComposer } from '../cloudfront-functions/function-composer';
 import { Extension, ExtensionConfig, AddBehaviorOptions, RoleMatchMode } from './securedCloudFront';
+import { FunctionComposer } from '../cloudfront-functions/function-composer';
 
 export interface CognitoCloudFrontProps<TRole extends string = string> {
   readonly defaultBehavior: Omit<cloudfront.BehaviorOptions, 'functionAssociations'>;

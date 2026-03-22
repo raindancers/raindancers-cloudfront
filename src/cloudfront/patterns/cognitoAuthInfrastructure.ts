@@ -5,8 +5,8 @@ import {
   aws_lambda as lambda,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
-import { CognitoAuthSecretManager } from '../auth/cognitoAuthSecretManager';
 import { AuthLambdaFunctions } from '../auth/authLambdaFunctions';
+import { CognitoAuthSecretManager } from '../auth/cognitoAuthSecretManager';
 import { AuthSecurityTable } from '../authSecurityTable';
 import { AuditLogArchive } from '../logging/auditLogArchive';
 import { SsmCrossRegionWriter } from '../ssmCrossRegionWriter';

@@ -1,7 +1,7 @@
 import { BicepConstruct } from './bicepConstruct';
+import { ExistingServicePrincipal } from './existingServicePrincipal';
 import { Group } from './group';
 import { ServicePrincipal } from './servicePrincipal';
-import { ExistingServicePrincipal } from './existingServicePrincipal';
 import { BicepTemplate } from '../../deploy/template';
 
 /**
@@ -26,10 +26,10 @@ export class AppRoleAssignment extends BicepConstruct {
   }
 
   synthesize(): void {
-    const principalId = typeof this.props.principal === 'string' 
-      ? this.props.principal 
+    const principalId = typeof this.props.principal === 'string'
+      ? this.props.principal
       : this.props.principal.groupId;
-    
+
     const resourceId = typeof this.props.resourceServicePrincipal === 'string'
       ? this.props.resourceServicePrincipal
       : this.props.resourceServicePrincipal.servicePrincipalId;

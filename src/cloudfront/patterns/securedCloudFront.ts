@@ -256,9 +256,9 @@ def get_config():
     }
 
     if (props.additionalBehaviors) {
-      Object.entries(props.additionalBehaviors).forEach(([path, behavior]) => {
-        if (path !== '/oauth2/callback') {
-          additionalBehaviors[path] = behavior;
+      Object.entries(props.additionalBehaviors).forEach(([pathPattern, behavior]) => {
+        if (pathPattern !== '/oauth2/callback') {
+          additionalBehaviors[pathPattern] = behavior;
         }
       });
     }

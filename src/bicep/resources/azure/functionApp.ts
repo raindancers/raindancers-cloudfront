@@ -1,7 +1,7 @@
+import { ApplicationInsights } from './applicationInsights';
 import { AppServicePlan } from './appServicePlan';
 import { ManagedIdentity } from './managedIdentity';
 import { StorageAccount } from './storageAccount';
-import { ApplicationInsights } from './applicationInsights';
 import { BicepTemplate } from '../../deploy/template';
 import { BicepConstruct } from '../graph/bicepConstruct';
 
@@ -26,7 +26,7 @@ export class FunctionApp extends BicepConstruct {
 
   synthesize(): void {
     const managedIdentityIdRef = `\${${this.props.managedIdentity.id}}`;
-    
+
     this.template.addResource(this.resourceName, {
       type: 'Microsoft.Web/sites',
       apiVersion: '2022-09-01',

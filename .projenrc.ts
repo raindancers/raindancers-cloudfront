@@ -16,4 +16,8 @@ const project = new typescript.TypeScriptProject({
     'constructs@10.5.0',
   ],
 });
+
+project.addPackageIgnore('.amazonq/');
+project.addPackageIgnore('.devcontainer/');
+
 project.synth();

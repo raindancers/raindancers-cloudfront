@@ -3,8 +3,8 @@ import {
   aws_iam as iam,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
-import { AuthSecretManager } from '../auth/authSecretManager';
 import { AuthLambdaFunctions } from '../auth/authLambdaFunctions';
+import { AuthSecretManager } from '../auth/authSecretManager';
 import { AuthSecurityTable } from '../authSecurityTable';
 import { AuditLogArchive } from '../logging/auditLogArchive';
 import { SsmCrossRegionWriter } from '../ssmCrossRegionWriter';

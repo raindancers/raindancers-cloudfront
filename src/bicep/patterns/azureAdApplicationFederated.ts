@@ -1,5 +1,5 @@
-import * as path from 'path';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as core from 'aws-cdk-lib';
 import {
   aws_s3_assets as s3assets,
@@ -89,8 +89,8 @@ export class AzureAdApplicationFederated extends Construct {
         },
       })
       .withExtensions(bicep.BicepExtension.MICROSOFT_GRAPH_STABLE)
-      .withResources(template => {
-        claimsProviderResult = this.buildResources(template, props);
+      .withResources(builder => {
+        claimsProviderResult = this.buildResources(builder, props);
       })
       .withOutputs({
         appId: 'Application.appId',
@@ -216,7 +216,7 @@ export class AzureAdApplicationFederated extends Construct {
     template.addStringParameter('deploymentSpObjectId', 'Object ID of the SP deploying this template (needs Storage Blob Data Contributor)', '');
 
     const namePrefix = props.appName.toLowerCase();
-    const uniqueSuffix = "substring(uniqueString(resourceGroup().id), 0, 8)";
+    const uniqueSuffix = 'substring(uniqueString(resourceGroup().id), 0, 8)';
 
     const managedIdentity = new azure.ManagedIdentity(template, 'managedIdentity', {
       name: `'${namePrefix}-claims-identity-\${${uniqueSuffix}}'`,
@@ -294,25 +294,25 @@ export class AzureAdApplicationFederated extends Construct {
     const miPolicyReadPermission = new graph.AppRoleAssignment(template, 'miPolicyReadPermission', {
       resourceServicePrincipal: graphServicePrincipal,
       principal: `${managedIdentity.principalId}`,
-      appRoleId: `'246dd0d5-5bd0-4def-940b-0421030a5b68'`,
+      appRoleId: '\'246dd0d5-5bd0-4def-940b-0421030a5b68\'',
     });
 
     const miPolicyPermission = new graph.AppRoleAssignment(template, 'miPolicyPermission', {
       resourceServicePrincipal: graphServicePrincipal,
       principal: `${managedIdentity.principalId}`,
-      appRoleId: `'be74164b-cff1-491c-8741-e671cb536e13'`,
+      appRoleId: '\'be74164b-cff1-491c-8741-e671cb536e13\'',
     });
 
     const miCustomAuthExtPermission = new graph.AppRoleAssignment(template, 'miCustomAuthExtPermission', {
       resourceServicePrincipal: graphServicePrincipal,
       principal: `${managedIdentity.principalId}`,
-      appRoleId: `'c2667967-7050-4e7e-b059-4cbbb3811d03'`,
+      appRoleId: '\'c2667967-7050-4e7e-b059-4cbbb3811d03\'',
     });
 
     const miEventListenerPermission = new graph.AppRoleAssignment(template, 'miEventListenerPermission', {
       resourceServicePrincipal: graphServicePrincipal,
       principal: `${managedIdentity.principalId}`,
-      appRoleId: `'0edf5e9e-4ce8-468a-8432-d08631d18c43'`,
+      appRoleId: '\'0edf5e9e-4ce8-468a-8432-d08631d18c43\'',
     });
 
     const miAppReadWritePermission = new graph.AppRoleAssignment(template, 'miAppReadWritePermission', {
@@ -326,8 +326,8 @@ export class AzureAdApplicationFederated extends Construct {
       managedIdentity: managedIdentity,
       scriptContent: fs.readFileSync(path.join(__dirname, 'scripts', 'wire-custom-claims-extension.sh'), 'utf8'),
       environmentVariables: {
-        FUNCTION_HOSTNAME: `Functionapp.properties.defaultHostName`,
-        FUNCTION_APP_ID: `Functionappregistration.appId`,
+        FUNCTION_HOSTNAME: 'Functionapp.properties.defaultHostName',
+        FUNCTION_APP_ID: 'Functionappregistration.appId',
         CLF_APP_ID: 'Application.appId',
         EXT_DISPLAY_NAME: `'${namePrefix}-claims-provider'`,
       },

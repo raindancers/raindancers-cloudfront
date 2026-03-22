@@ -81,9 +81,9 @@ export class FunctionComposer {
     const content = fs.readFileSync(filePath, 'utf-8');
 
     return content
-      .replace(/\/\*[\s\S]*?\*\//g, '')        // block comments
-      .replace(/^\s*\/\/.*$/gm, '')             // line comments (whole-line only)
-      .replace(/^\s*\n/gm, '')                 // blank lines
+      .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
+      .replace(/^\s*\/\/.*$/gm, '') // line comments (whole-line only)
+      .replace(/^\s*\n/gm, '') // blank lines
       .replace(/function handler\(event\) \{[\s\S]*?\n\}/g, '')
       .replace(/async function handler\(event\) \{[\s\S]*?\n\}/g, '');
   }
@@ -112,7 +112,7 @@ export class FunctionComposer {
       const requiredRoles = config?.requiredRoles ? config.requiredRoles : [];
       const matchMode = config?.roleMatchMode || RoleMatchMode.OR;
       const rolesJson = JSON.stringify(requiredRoles);
-      
+
       lines.push(
         '  // Authentication check',
         `  var requiredRoles = ${rolesJson};`,

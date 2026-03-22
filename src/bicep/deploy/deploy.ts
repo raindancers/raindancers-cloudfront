@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as core from 'aws-cdk-lib';
 import {
@@ -55,7 +56,6 @@ export class BicepDeployment extends constructs.Construct {
     super(scope, id);
 
     const deploymentName = props.deploymentName || `cdk-${id}`;
-    const fs = require('fs');
     const bicepDir = 'cdk.out/bicep';
     if (!fs.existsSync(bicepDir)) {
       fs.mkdirSync(bicepDir, { recursive: true });
