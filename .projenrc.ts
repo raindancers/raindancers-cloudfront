@@ -7,6 +7,7 @@ const project = new typescript.TypeScriptProject({
   projenrcTs: true,
   repository: 'https://github.com/raindancers/raindancers-cloudfront',
   releaseToNpm: true,
+  sampleCode: false,
   peerDeps: [
     'aws-cdk-lib@^2.244.0',
     'constructs@^10.5.0',
