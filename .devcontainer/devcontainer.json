@@ -1,0 +1,28 @@
+{
+  "name": "ApplicationSets Development",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
+  "features": {
+    "ghcr.io/devcontainers/features/aws-cli:1": {},
+    "ghcr.io/devcontainers/features/azure-cli:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "moby": false
+    },
+    "ghcr.io/devcontainers/features/python:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.vscode-typescript-next",
+        "amazonwebservices.aws-toolkit-vscode",
+        "amazonwebservices.amazon-q-vscode",
+        "github.vscode-github-actions",
+        "ms-vscode.vscode-json",
+        "ms-python.python",
+        "ms-python.pylint"
+      ]
+    }
+  },
+  "postCreateCommand": "chmod +x .devcontainer/setup.sh .devcontainer/scripts/*.sh && .devcontainer/setup.sh",
+  "remoteUser": "node"
+}
