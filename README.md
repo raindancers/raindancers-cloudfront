@@ -1,4 +1,4 @@
-# DevContainer Setup
+# DevContainer Setup.
 
 This directory contains the configuration and setup scripts for the development container environment.
 
