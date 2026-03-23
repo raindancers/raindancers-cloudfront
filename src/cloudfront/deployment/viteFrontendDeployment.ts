@@ -7,6 +7,7 @@ export interface ViteFrontendDeploymentProps {
   readonly sourcePath: string;
   readonly destinationBucket: s3.IBucket;
   readonly distribution: cloudfront.IDistribution;
+  readonly distributionPaths?: string[];
 }
 
 export class ViteFrontendDeployment extends Construct {
@@ -30,7 +31,7 @@ export class ViteFrontendDeployment extends Construct {
       destinationBucket: props.destinationBucket,
       destinationKeyPrefix: `${props.appName}/`,
       distribution: props.distribution,
-      distributionPaths: ['/*'],
+      distributionPaths: props.distributionPaths ?? [`/${props.appName}/*`],
     });
   }
 }
