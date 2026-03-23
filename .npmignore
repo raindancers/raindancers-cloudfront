@@ -23,6 +23,11 @@ tsconfig.tsbuildinfo
 /.eslintrc.json
 .amazonq/
 .devcontainer/
+!/lib/**/*.py
+!/lib/**/*.sh
+!/lib/**/requirements.txt
+!/lib/**/Dockerfile
+!/lib/**/host.json
 /.gitattributes
 /.projenrc.ts
 /projenrc

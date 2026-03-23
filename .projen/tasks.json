@@ -80,6 +80,9 @@
       "steps": [
         {
           "exec": "tsc --build"
+        },
+        {
+          "exec": "rsync -av --include=\"*/\" --include=\"*.py\" --include=\"*.js\" --include=\"requirements.txt\" --include=\"Dockerfile\" --include=\"host.json\" --include=\"*.sh\" --exclude=\"*.ts\" --exclude=\"*.d.ts\" --exclude=\"*.js.map\" src/ lib/"
         }
       ]
     },
