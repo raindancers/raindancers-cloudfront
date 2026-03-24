@@ -42,7 +42,7 @@ export class CognitoAuthInfrastructure extends constructs.Construct {
     const preTokenLambda = new lambda.Function(this, 'PreTokenLambda', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../cloudfront/lambda/pre-token')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/pre-token')),
       timeout: core.Duration.seconds(5),
     });
 
