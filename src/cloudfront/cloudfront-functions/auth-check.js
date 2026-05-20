@@ -90,11 +90,12 @@ function generateCodeChallenge(verifier) {
     return hash.digest('base64url');
 }
 
-function generateState(originalPath) {
+function generateState(originalPath, host) {
     var randomPart = Math.random().toString(36).substring(2) + Date.now().toString(36);
     var stateObj = {
         r: randomPart,
-        p: originalPath
+        p: originalPath,
+        h: host
     };
     return btoa(JSON.stringify(stateObj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
@@ -136,8 +137,8 @@ function getOriginalPath(request) {
     return request.uri + '?' + qs;
 }
 
-function redirectToAuth(originalPath) {
-    var state = generateState(originalPath);
+function redirectToAuth(originalPath, host) {
+    var state = generateState(originalPath, host);
     var codeVerifier = generateCodeVerifier();
     var codeChallenge = generateCodeChallenge(codeVerifier);
     var domainAttr = COOKIE_DOMAIN ? '; Domain=' + COOKIE_DOMAIN : '';
@@ -169,17 +170,18 @@ async function handler(event) {
     }
     
     var cookies = request.cookies;
+    var host = request.headers.host ? request.headers.host.value : '';
     
     // Check for session cookie (supports both __Secure- with domain and __Host- without)
     var sessionCookie = cookies['__Secure-auth_session'] || cookies['__Host-auth_session'];
     if (!sessionCookie) {
-        return redirectToAuth(getOriginalPath(request));
+        return redirectToAuth(getOriginalPath(request), host);
     }
     
     var token = sessionCookie.value;
     
     if (!token || token.length === 0) {
-        return redirectToAuth(getOriginalPath(request));
+        return redirectToAuth(getOriginalPath(request), host);
     }
     
     try {
@@ -187,19 +189,19 @@ async function handler(event) {
         var parts = token.split('.');
         
         if (parts.length !== 3) {
-            return redirectToAuth(originalPath);
+            return redirectToAuth(originalPath, host);
         }
         
         var isValid = await validateHmacSignature(token);
         if (!isValid) {
-            return redirectToAuth(originalPath);
+            return redirectToAuth(originalPath, host);
         }
         
         var payload = JSON.parse(base64urlDecode(parts[1]));
         var now = Math.floor(Date.now() / 1000);
         
         if (payload.exp && payload.exp < now) {
-            return redirectToAuth(originalPath);
+            return redirectToAuth(originalPath, host);
         }
         
         // Check if session is revoked (denylist approach)
@@ -209,7 +211,7 @@ async function handler(event) {
                 var isRevoked = await kvsHandle.get('revoked:' + jti);
                 if (isRevoked) {
                     console.log('Session revoked: ' + jti);
-                    return redirectToAuth(originalPath);
+                    return redirectToAuth(originalPath, host);
                 }
             } catch (e) {
                 console.log('KVS error checking revocation: ' + e);
@@ -218,6 +220,6 @@ async function handler(event) {
         
         return request;
     } catch (e) {
-        return redirectToAuth(getOriginalPath(request));
+        return redirectToAuth(getOriginalPath(request), host);
     }
 }
