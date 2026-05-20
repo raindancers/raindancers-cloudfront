@@ -328,15 +328,20 @@ def lambda_handler(event, context):
     
     logger.info(f'CSRF validation passed, proceeding with token exchange')
     
-    # Decode state to get original path
+    # Decode state to get original path and host
     redirect_path = '/'
     try:
         # Decode base64url state
         state_padded = state + '=' * (4 - len(state) % 4)
         state_decoded = base64.urlsafe_b64decode(state_padded.replace('-', '+').replace('_', '/')).decode('utf-8')
         state_obj = json.loads(state_decoded)
-        redirect_path = state_obj.get('p', '/')
-        logger.info(f'Decoded original path from state: {redirect_path}')
+        original_path = state_obj.get('p', '/')
+        original_host = state_obj.get('h', '')
+        if original_host:
+            redirect_path = f'https://{original_host}{original_path}'
+        else:
+            redirect_path = original_path
+        logger.info(f'Decoded redirect target from state: {redirect_path}')
     except Exception as e:
         logger.warning(f'Could not decode state, using default redirect: {str(e)}')
         redirect_path = '/'

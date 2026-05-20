@@ -82,11 +82,12 @@ function generateCodeChallenge(verifier) {
   return hash.digest('base64url');
 }
 
-function generateState(originalPath) {
+function generateState(originalPath, host) {
   var randomPart = Math.random().toString(36).substring(2) + Date.now().toString(36);
   var stateObj = {
     r: randomPart,
-    p: originalPath
+    p: originalPath,
+    h: host
   };
   return btoa(JSON.stringify(stateObj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
@@ -128,8 +129,8 @@ function getOriginalPath(request) {
   return request.uri + '?' + qs;
 }
 
-function redirectToAuth(originalPath) {
-  var state = generateState(originalPath);
+function redirectToAuth(originalPath, host) {
+  var state = generateState(originalPath, host);
   var codeVerifier = generateCodeVerifier();
   var codeChallenge = generateCodeChallenge(codeVerifier);
   var domainAttr = COOKIE_DOMAIN ? '; Domain=' + COOKIE_DOMAIN : '';
@@ -162,18 +163,19 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
   }
   var cookies = request.cookies;
   var originalPath = getOriginalPath(request);
+  var host = request.headers.host ? request.headers.host.value : '';
   var sessionCookie = cookies['__Secure-auth_session'] || cookies['__Host-auth_session'];
   if (!sessionCookie) {
     return {
       pass: false,
-      response: redirectToAuth(originalPath)
+      response: redirectToAuth(originalPath, host)
     };
   }
   var token = sessionCookie.value;
   if (!token || token.length === 0) {
     return {
       pass: false,
-      response: redirectToAuth(originalPath)
+      response: redirectToAuth(originalPath, host)
     };
   }
   try {
@@ -181,14 +183,14 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
     if (parts.length !== 3) {
       return {
         pass: false,
-        response: redirectToAuth(originalPath)
+        response: redirectToAuth(originalPath, host)
       };
     }
     var isValid = await validateHmacSignature(token);
     if (!isValid) {
       return {
         pass: false,
-        response: redirectToAuth(originalPath)
+        response: redirectToAuth(originalPath, host)
       };
     }
     var payload = JSON.parse(base64urlDecode(parts[1]));
@@ -196,7 +198,7 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
     if (payload.exp && payload.exp < now) {
       return {
         pass: false,
-        response: redirectToAuth(originalPath)
+        response: redirectToAuth(originalPath, host)
       };
     }
     var jti = payload.jti;
@@ -206,7 +208,7 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
         if (isRevoked) {
           return {
             pass: false,
-            response: redirectToAuth(originalPath)
+            response: redirectToAuth(originalPath, host)
           };
         }
       } catch (e) {}
@@ -250,7 +252,7 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
   } catch (e) {
     return {
       pass: false,
-      response: redirectToAuth(originalPath)
+      response: redirectToAuth(originalPath, host)
     };
   }
 }
