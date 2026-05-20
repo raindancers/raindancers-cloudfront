@@ -42,6 +42,7 @@ export interface CloudFrontWithAzureAuthSplitProps<TRole extends string = string
   readonly domainNames: string[];
   readonly certificate: any;
   readonly redirectUri?: string;
+  readonly cookieDomain?: string;
   readonly webAclId?: string;
   readonly hmacSecretRotationSchedule?: core.Duration;
   readonly securityAlertsTopicArn?: string;
@@ -79,6 +80,7 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
   private readonly tenantId: string;
   private readonly clientId: string;
   private readonly redirectUri: string;
+  private readonly cookieDomain: string;
   private readonly kvs: cloudfront.IKeyValueStore;
 
   constructor(scope: constructs.Construct, id: string, props: CloudFrontWithAzureAuthSplitProps<TRole>) {
@@ -142,6 +144,7 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
     this.tenantId = tenantId;
     this.clientId = clientId;
     this.redirectUri = redirectUri;
+    this.cookieDomain = props.cookieDomain || '';
 
     const configPyContent = `# Generated configuration
 import json
@@ -408,6 +411,7 @@ def get_config():
         tenantId: this.tenantId,
         clientId: this.clientId,
         redirectUri: this.redirectUri,
+        cookieDomain: this.cookieDomain,
       });
 
       // Create CloudFront Function
@@ -488,6 +492,7 @@ def get_config():
     code = code.replace('TENANT_ID_PLACEHOLDER', tenantId);
     code = code.replace('CLIENT_ID_PLACEHOLDER', clientId);
     code = code.replace('REDIRECT_URI_PLACEHOLDER', redirectUri);
+    code = code.replace('COOKIE_DOMAIN_PLACEHOLDER', this.cookieDomain);
     return code;
   }
 

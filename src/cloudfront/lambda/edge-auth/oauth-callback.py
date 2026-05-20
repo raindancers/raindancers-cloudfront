@@ -201,6 +201,7 @@ def lambda_handler(event, context):
         security_alerts_topic_arn = config.get('security_alerts_topic_arn')
         auto_revoke_on_reuse = config.get('auto_revoke_on_reuse', 'false').lower() == 'true'
         allowed_domains_str = config.get('allowed_domains', '[]')
+        cookie_domain = config.get('cookie_domain', '')
         allowed_domains = json.loads(allowed_domains_str)
     except Exception as e:
         logger.error(f'Failed to load configuration: {str(e)}')
@@ -487,26 +488,30 @@ def lambda_handler(event, context):
         logger.info(f'Cookie expiry set to: {expires_str}')
         
         # Build Set-Cookie headers
+        domain_attr = f'; Domain={cookie_domain}' if cookie_domain else ''
+        cookie_prefix = '__Secure-' if cookie_domain else '__Host-'
         auth_cookie = (
-            f'__Host-auth_session={cookie_value}; '
+            f'{cookie_prefix}auth_session={cookie_value}; '
             f'HttpOnly; Secure; SameSite=Lax; '
             f'Path=/; '
             f'Expires={expires_str}'
+            f'{domain_attr}'
         )
         
         # Create Azure AD JWT cookie for IAM authorization
         azure_cookie = (
-            f'__Host-azure_token={azure_id_token}; '
+            f'{cookie_prefix}azure_token={azure_id_token}; '
             f'HttpOnly; Secure; SameSite=Lax; '
             f'Path=/; '
             f'Expires={expires_str}'
+            f'{domain_attr}'
         )
         
         # Clear oauth_state cookie
-        state_cookie = 'oauth_state=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0'
+        state_cookie = f'oauth_state=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0{domain_attr}'
         
         # Clear code_verifier cookie
-        verifier_cookie = 'code_verifier=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0'
+        verifier_cookie = f'code_verifier=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0{domain_attr}'
         
         logger.info('Step 4: Building redirect response')
         response = {

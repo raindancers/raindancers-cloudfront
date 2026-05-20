@@ -7,6 +7,7 @@ export interface ComposerConfig {
   readonly cognitoDomain?: string;
   readonly clientId?: string;
   readonly redirectUri?: string;
+  readonly cookieDomain?: string;
 }
 
 /**
@@ -57,6 +58,9 @@ export class FunctionComposer {
         }
         if (composerConfig.redirectUri) {
           authModule = authModule.replace(/REDIRECT_URI_PLACEHOLDER/g, composerConfig.redirectUri);
+        }
+        if (composerConfig.cookieDomain !== undefined) {
+          authModule = authModule.replace(/COOKIE_DOMAIN_PLACEHOLDER/g, composerConfig.cookieDomain);
         }
       }
       parts.push(authModule);
