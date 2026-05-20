@@ -49,6 +49,7 @@ export interface AuthInfrastructureProps {
   readonly clientId: string;
   readonly oauth2CallbackRoleName: string;
   readonly appSpec: AppSpec;
+  readonly cookieDomain?: string;
   readonly securityAlertsTopicArn?: string;
   readonly sessionRevocationTopicArn?: string;
   readonly autoRevokeOnReuse?: boolean;
@@ -95,6 +96,7 @@ export class AuthInfrastructure extends constructs.Construct {
       securityAlertsTopicArn: props.securityAlertsTopicArn,
       autoRevokeOnReuse: props.autoRevokeOnReuse,
       jwtClaimsWhitelist: props.jwtClaimsWhitelist,
+      cookieDomain: props.cookieDomain,
     });
 
     const auditLogRetentionDays = props.auditLogRetentionDays ?? 30;

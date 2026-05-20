@@ -15,6 +15,7 @@ export interface AuthSecretManagerProps {
   readonly azureTenantId: string;
   readonly azureClientId: string;
   readonly stsAudience: string;
+  readonly cookieDomain?: string;
   readonly securityAlertsTopicArn?: string;
   readonly autoRevokeOnReuse?: boolean;
   readonly jwtClaimsWhitelist?: string[];
@@ -66,6 +67,7 @@ export class AuthSecretManager extends constructs.Construct {
           auto_revoke_on_reuse: props.autoRevokeOnReuse ? 'true' : 'false',
           jwt_claims_whitelist: JSON.stringify(jwtClaimsWhitelist),
           allowed_domains: JSON.stringify([props.domainName]),
+          cookie_domain: props.cookieDomain || '',
         }),
         generateStringKey: 'hmac_key',
         excludePunctuation: true,

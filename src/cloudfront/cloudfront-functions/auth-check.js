@@ -6,6 +6,7 @@ const kvsHandle = cf.kvs();
 const AZURE_TENANT_ID = 'TENANT_ID_PLACEHOLDER';
 const AZURE_CLIENT_ID = 'CLIENT_ID_PLACEHOLDER';
 const REDIRECT_URI = 'REDIRECT_URI_PLACEHOLDER';
+const COOKIE_DOMAIN = 'COOKIE_DOMAIN_PLACEHOLDER';
 
 function base64urlDecode(str) {
     var base64 = str.replace(/-/g, '+').replace(/_/g, '/');
@@ -139,6 +140,7 @@ function redirectToAuth(originalPath) {
     var state = generateState(originalPath);
     var codeVerifier = generateCodeVerifier();
     var codeChallenge = generateCodeChallenge(codeVerifier);
+    var domainAttr = COOKIE_DOMAIN ? '; Domain=' + COOKIE_DOMAIN : '';
     return {
         statusCode: 302,
         headers: {
@@ -148,11 +150,11 @@ function redirectToAuth(originalPath) {
         cookies: {
             oauth_state: {
                 value: state,
-                attributes: 'HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600'
+                attributes: 'HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600' + domainAttr
             },
             code_verifier: {
                 value: codeVerifier,
-                attributes: 'HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600'
+                attributes: 'HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600' + domainAttr
             }
         }
     };
@@ -168,12 +170,13 @@ async function handler(event) {
     
     var cookies = request.cookies;
     
-    // Check for session cookie
-    if (!cookies['__Host-auth_session']) {
+    // Check for session cookie (supports both __Secure- with domain and __Host- without)
+    var sessionCookie = cookies['__Secure-auth_session'] || cookies['__Host-auth_session'];
+    if (!sessionCookie) {
         return redirectToAuth(getOriginalPath(request));
     }
     
-    var token = cookies['__Host-auth_session'].value;
+    var token = sessionCookie.value;
     
     if (!token || token.length === 0) {
         return redirectToAuth(getOriginalPath(request));
