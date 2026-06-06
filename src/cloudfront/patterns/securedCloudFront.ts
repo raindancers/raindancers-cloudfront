@@ -58,6 +58,8 @@ export interface CloudFrontWithAzureAuthSplitProps<TRole extends string = string
   readonly defaultExtensionConfig?: ExtensionConfig<TRole>;
   readonly defaultRootObject?: string;
   readonly errorResponsePagePath?: string;
+  /** Whether to add custom error responses (SPA routing). Defaults to true. */
+  readonly enableErrorResponses?: boolean;
   readonly enableUserInfoInjection?: boolean;
   readonly userInfoNameFields?: string[];
 }
@@ -293,7 +295,7 @@ def get_config():
       certificate: props.certificate,
       webAclId: props.webAclId,
       defaultRootObject: props.defaultRootObject ?? 'index.html',
-      errorResponses: [
+      errorResponses: (props.enableErrorResponses ?? true) ? [
         {
           httpStatus: 403,
           responseHttpStatus: 200,
@@ -330,7 +332,7 @@ def get_config():
           responsePagePath: props.errorResponsePagePath ?? '/error.html',
           ttl: core.Duration.seconds(10),
         },
-      ],
+      ] : [],
     });
 
     // Add /userinfo behavior if user info endpoint is enabled

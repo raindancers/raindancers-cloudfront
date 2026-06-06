@@ -22,6 +22,8 @@ export interface CognitoCloudFrontProps<TRole extends string = string> {
   readonly defaultExtensionConfig?: ExtensionConfig<TRole>;
   readonly defaultRootObject?: string;
   readonly errorResponsePagePath?: string;
+  /** Whether to add custom error responses (SPA routing). Defaults to true. */
+  readonly enableErrorResponses?: boolean;
   readonly enableUserInfoInjection?: boolean;
   readonly userInfoNameFields?: string[];
 }
@@ -208,14 +210,14 @@ def get_config():
       domainNames: props.domainNames,
       certificate: props.certificate,
       defaultRootObject: props.defaultRootObject ?? 'index.html',
-      errorResponses: [
+      errorResponses: (props.enableErrorResponses ?? true) ? [
         { httpStatus: 403, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.minutes(5) },
         { httpStatus: 404, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.minutes(5) },
         { httpStatus: 500, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.seconds(10) },
         { httpStatus: 502, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.seconds(10) },
         { httpStatus: 503, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.seconds(10) },
         { httpStatus: 504, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.seconds(10) },
-      ],
+      ] : [],
     });
 
     if (this.userInfoFunction) {
