@@ -22,7 +22,7 @@ export interface CognitoCloudFrontProps<TRole extends string = string> {
   readonly defaultExtensionConfig?: ExtensionConfig<TRole>;
   readonly defaultRootObject?: string;
   readonly errorResponsePagePath?: string;
-  /** Whether to add custom error responses (SPA routing). Defaults to true. */
+  /** Whether to add custom error responses (SPA routing). Defaults to false. */
   readonly enableErrorResponses?: boolean;
   readonly enableUserInfoInjection?: boolean;
   readonly userInfoNameFields?: string[];
@@ -210,7 +210,7 @@ def get_config():
       domainNames: props.domainNames,
       certificate: props.certificate,
       defaultRootObject: props.defaultRootObject ?? 'index.html',
-      errorResponses: (props.enableErrorResponses ?? true) ? [
+      errorResponses: props.enableErrorResponses ? [
         { httpStatus: 403, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.minutes(5) },
         { httpStatus: 404, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.minutes(5) },
         { httpStatus: 500, responseHttpStatus: 200, responsePagePath: props.errorResponsePagePath ?? '/error.html', ttl: core.Duration.seconds(10) },
