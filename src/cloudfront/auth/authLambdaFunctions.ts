@@ -73,7 +73,6 @@ export class AuthLambdaFunctions extends constructs.Construct {
       properties: {
         SecretArn: props.configSecret.secretArn,
         KvsArn: props.kvs.keyValueStoreArn,
-        Timestamp: Date.now().toString(),
       },
     });
 
