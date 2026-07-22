@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as path from 'path';
 import * as core from 'aws-cdk-lib';
 import {
@@ -52,6 +53,27 @@ export class AuthLambdaFunctions extends constructs.Construct {
       logGroup: copySecretLogGroup,
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/hmacSecret'), {
         bundling: {
+          local: {
+            tryBundle(outputDir: string): boolean {
+              const bundledDepsDir = path.join(__dirname, '../lambda-bundled/hmacSecret');
+              const sourceDir = path.join(__dirname, '../lambda/hmacSecret');
+
+              // Copy pre-bundled dependencies
+              fs.cpSync(bundledDepsDir, outputDir, { recursive: true });
+
+              // Copy Lambda source files (overwrite any conflicts with source)
+              const sourceFiles = fs.readdirSync(sourceDir);
+              for (const file of sourceFiles) {
+                if (file === 'requirements.txt') continue;
+                const srcPath = path.join(sourceDir, file);
+                const destPath = path.join(outputDir, file);
+                fs.cpSync(srcPath, destPath, { recursive: true });
+              }
+
+              return true;
+            },
+          },
+          // Fallback: Docker-based bundling if local bundling fails (e.g. pre-bundled deps missing)
           image: lambda.Runtime.PYTHON_3_12.bundlingImage,
           command: [
             'bash', '-c',

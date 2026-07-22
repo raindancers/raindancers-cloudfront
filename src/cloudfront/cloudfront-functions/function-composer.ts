@@ -8,6 +8,7 @@ export interface ComposerConfig {
   readonly clientId?: string;
   readonly redirectUri?: string;
   readonly cookieDomain?: string;
+  readonly requireMfa?: boolean;
 }
 
 /**
@@ -68,7 +69,7 @@ export class FunctionComposer {
     }
 
     // Generate handler function
-    parts.push(this.generateHandler(checks, config));
+    parts.push(this.generateHandler(checks, config, composerConfig));
 
     const code = parts.join('\n\n');
     const sizeKB = Buffer.byteLength(code, 'utf-8') / 1024;
@@ -92,8 +93,9 @@ export class FunctionComposer {
       .replace(/async function handler\(event\) \{[\s\S]*?\n\}/g, '');
   }
 
-  private generateHandler(checks: string[], config?: ExtensionConfig): string {
+  private generateHandler(checks: string[], config?: ExtensionConfig, composerConfig?: ComposerConfig): string {
     const hasAuth = checks.includes('auth');
+    const requireMfa = composerConfig?.requireMfa ?? false;
     const lines: string[] = [
       '// Generated handler function',
       hasAuth ? 'async function handler(event) {' : 'function handler(event) {',
@@ -131,6 +133,24 @@ export class FunctionComposer {
         '  }',
         '',
       );
+
+      // MFA enforcement (defence in depth)
+      if (requireMfa) {
+        lines.push(
+          '  // MFA enforcement',
+          '  if (decodedPayload) {',
+          '    var amr = decodedPayload.amr || [];',
+          '    if (amr.indexOf(\'mfa\') === -1) {',
+          '      return {',
+          '        statusCode: 403,',
+          '        statusDescription: \'Forbidden\',',
+          '        body: \'Access denied: MFA required\'',
+          '      };',
+          '    }',
+          '  }',
+          '',
+        );
+      }
     }
 
     // Add URL rewrite after auth so originalPath is saved correctly
