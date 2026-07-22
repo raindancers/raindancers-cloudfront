@@ -8,6 +8,7 @@ import {
   aws_kms as kms,
   aws_iam as iam,
   aws_lambda as lambda,
+  aws_s3 as s3,
   aws_ssm as ssm,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
@@ -62,6 +63,18 @@ export interface CloudFrontWithAzureAuthSplitProps<TRole extends string = string
   readonly enableErrorResponses?: boolean;
   readonly enableUserInfoInjection?: boolean;
   readonly userInfoNameFields?: string[];
+  /** Enable CloudFront standard access logging. @default false */
+  readonly enableAccessLogging?: boolean;
+  /** S3 bucket for access logs. If not provided, a bucket will be created. @default auto-created bucket */
+  readonly accessLogBucket?: s3.IBucket;
+  /** Prefix for access log files. @default 'cdn-logs/' */
+  readonly accessLogPrefix?: string;
+  /** Number of days before access logs transition to Infrequent Access. @default 30 */
+  readonly accessLogTransitionDays?: number;
+  /** Number of days before access logs are deleted. @default 365 */
+  readonly accessLogExpirationDays?: number;
+  /** Require MFA (amr claim must contain 'mfa'). Defence in depth — primary enforcement should be via Entra Conditional Access. @default false */
+  readonly requireMfa?: boolean;
 }
 
 export class SecuredCloudFront<TRole extends string = string> extends constructs.Construct {
@@ -73,6 +86,7 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
   public readonly authSecurityTable: AuthSecurityTable;
   public readonly auditLogArchive: any;
   public readonly lambdaEdgeRole: iam.Role;
+  public readonly accessLogBucket?: s3.IBucket;
   private readonly authCheckFunction: cloudfront.Function;
   private readonly userInfoFunction?: cloudfront.Function;
   private readonly functionComposer: FunctionComposer;
@@ -84,6 +98,7 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
   private readonly redirectUri: string;
   private readonly cookieDomain: string;
   private readonly kvs: cloudfront.IKeyValueStore;
+  private readonly requireMfa: boolean;
 
   constructor(scope: constructs.Construct, id: string, props: CloudFrontWithAzureAuthSplitProps<TRole>) {
     super(scope, id);
@@ -147,6 +162,7 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
     this.clientId = clientId;
     this.redirectUri = redirectUri;
     this.cookieDomain = props.cookieDomain || '';
+    this.requireMfa = props.requireMfa ?? false;
 
     const configPyContent = `# Generated configuration
 import json
@@ -303,6 +319,34 @@ def get_config():
     this.functionComposer = new FunctionComposer();
     this.composedFunctions = new Map();
 
+    // Access logging
+    let logBucket: s3.IBucket | undefined;
+    if (props.enableAccessLogging) {
+      if (props.accessLogBucket) {
+        logBucket = props.accessLogBucket;
+      } else {
+        logBucket = new s3.Bucket(this, 'AccessLogBucket', {
+          blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+          encryption: s3.BucketEncryption.S3_MANAGED,
+          enforceSSL: true,
+          objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
+          removalPolicy: core.RemovalPolicy.RETAIN,
+          lifecycleRules: [
+            {
+              transitions: [
+                {
+                  storageClass: s3.StorageClass.INFREQUENT_ACCESS,
+                  transitionAfter: core.Duration.days(props.accessLogTransitionDays ?? 30),
+                },
+              ],
+              expiration: core.Duration.days(props.accessLogExpirationDays ?? 365),
+            },
+          ],
+        });
+      }
+      this.accessLogBucket = logBucket;
+    }
+
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2025,
@@ -318,6 +362,8 @@ def get_config():
       domainNames: props.domainNames,
       certificate: props.certificate,
       webAclId: props.webAclId,
+      logBucket: logBucket,
+      logFilePrefix: props.enableAccessLogging ? (props.accessLogPrefix ?? 'cdn-logs/') : undefined,
       defaultRootObject: props.defaultRootObject ?? 'index.html',
       errorResponses: props.enableErrorResponses ? [
         {
@@ -438,6 +484,7 @@ def get_config():
         clientId: this.clientId,
         redirectUri: this.redirectUri,
         cookieDomain: this.cookieDomain,
+        requireMfa: this.requireMfa,
       });
 
       // Create CloudFront Function

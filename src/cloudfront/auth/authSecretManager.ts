@@ -48,7 +48,7 @@ export class AuthSecretManager extends constructs.Construct {
     }));
 
     const jwtClaimsWhitelist = props.jwtClaimsWhitelist ?? [
-      'oid', 'tid', 'sub', 'email', 'name', 'preferred_username', 'groups', 'roles',
+      'oid', 'tid', 'sub', 'email', 'name', 'preferred_username', 'groups', 'roles', 'amr',
     ];
 
     const configSecretName = `cloudfront-auth-config-${props.domainName}`;
