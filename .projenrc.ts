@@ -29,15 +29,17 @@ project.compileTask.exec(
 
 // Pre-bundle Python Lambda dependencies for Linux x86_64 (Lambda target).
 // This eliminates Docker from cdk synth for consumers of this library.
+// NOTE: edge-auth and cognito-auth use Python 3.11 (Lambda@Edge constraint).
+//       hmacSecret uses Python 3.12 (standard Lambda).
 const lambdaBundles = [
-  { name: 'edge-auth', path: 'src/cloudfront/lambda/edge-auth/requirements.txt' },
-  { name: 'cognito-auth', path: 'src/cloudfront/lambda/cognito-auth/requirements.txt' },
-  { name: 'hmacSecret', path: 'src/cloudfront/lambda/hmacSecret/requirements.txt' },
+  { name: 'edge-auth', path: 'src/cloudfront/lambda/edge-auth/requirements.txt', pythonVersion: '3.11' },
+  { name: 'cognito-auth', path: 'src/cloudfront/lambda/cognito-auth/requirements.txt', pythonVersion: '3.11' },
+  { name: 'hmacSecret', path: 'src/cloudfront/lambda/hmacSecret/requirements.txt', pythonVersion: '3.12' },
 ];
 
 for (const bundle of lambdaBundles) {
   project.compileTask.exec(
-    `pip install -r ${bundle.path} --target lib/cloudfront/lambda-bundled/${bundle.name} --upgrade --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12 --implementation cp --quiet`,
+    `pip install -r ${bundle.path} --target lib/cloudfront/lambda-bundled/${bundle.name} --upgrade --platform manylinux2014_x86_64 --only-binary=:all: --python-version ${bundle.pythonVersion} --implementation cp --quiet`,
   );
 }
 
