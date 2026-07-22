@@ -83,6 +83,15 @@
         },
         {
           "exec": "rsync -av --include=\"*/\" --include=\"*.py\" --include=\"*.js\" --include=\"requirements.txt\" --include=\"Dockerfile\" --include=\"host.json\" --include=\"*.sh\" --exclude=\"*.ts\" --exclude=\"*.d.ts\" --exclude=\"*.js.map\" src/ lib/"
+        },
+        {
+          "exec": "pip install -r src/cloudfront/lambda/edge-auth/requirements.txt --target lib/cloudfront/lambda-bundled/edge-auth --upgrade --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12 --implementation cp --quiet"
+        },
+        {
+          "exec": "pip install -r src/cloudfront/lambda/cognito-auth/requirements.txt --target lib/cloudfront/lambda-bundled/cognito-auth --upgrade --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12 --implementation cp --quiet"
+        },
+        {
+          "exec": "pip install -r src/cloudfront/lambda/hmacSecret/requirements.txt --target lib/cloudfront/lambda-bundled/hmacSecret --upgrade --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12 --implementation cp --quiet"
         }
       ]
     },

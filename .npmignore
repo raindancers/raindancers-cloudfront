@@ -28,6 +28,7 @@ tsconfig.tsbuildinfo
 !/lib/**/requirements.txt
 !/lib/**/Dockerfile
 !/lib/**/host.json
+!/lib/**/lambda-bundled/**
 /.gitattributes
 /.projenrc.ts
 /projenrc

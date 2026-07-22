@@ -184,6 +184,30 @@ def get_config():
       handler: 'oauth-callback.lambda_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/edge-auth'), {
         bundling: {
+          local: {
+            tryBundle(outputDir: string): boolean {
+              const bundledDepsDir = path.join(__dirname, '../lambda-bundled/edge-auth');
+              const sourceDir = path.join(__dirname, '../lambda/edge-auth');
+
+              // Copy pre-bundled dependencies
+              fs.cpSync(bundledDepsDir, outputDir, { recursive: true });
+
+              // Copy Lambda source files (overwrite any conflicts with source)
+              const sourceFiles = fs.readdirSync(sourceDir);
+              for (const file of sourceFiles) {
+                if (file === 'requirements.txt') continue;
+                const srcPath = path.join(sourceDir, file);
+                const destPath = path.join(outputDir, file);
+                fs.cpSync(srcPath, destPath, { recursive: true });
+              }
+
+              // Write the generated config
+              fs.writeFileSync(path.join(outputDir, 'config_generated.py'), configPyContent);
+
+              return true;
+            },
+          },
+          // Fallback: Docker-based bundling if local bundling fails (e.g. pre-bundled deps missing)
           image: lambda.Runtime.PYTHON_3_11.bundlingImage,
           command: [
             'bash', '-c',
