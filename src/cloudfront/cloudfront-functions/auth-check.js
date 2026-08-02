@@ -7,6 +7,10 @@ const AZURE_TENANT_ID = 'TENANT_ID_PLACEHOLDER';
 const AZURE_CLIENT_ID = 'CLIENT_ID_PLACEHOLDER';
 const REDIRECT_URI = 'REDIRECT_URI_PLACEHOLDER';
 const COOKIE_DOMAIN = 'COOKIE_DOMAIN_PLACEHOLDER';
+const ENABLE_HEADER_INJECTION = ENABLE_HEADER_INJECTION_PLACEHOLDER;
+const HEADER_INJECTION_MAP = HEADER_INJECTION_MAP_PLACEHOLDER;
+const HEADER_INJECTION_KEYS = HEADER_INJECTION_KEYS_PLACEHOLDER;
+const ENABLE_REFRESH = ENABLE_REFRESH_PLACEHOLDER;
 
 function base64urlDecode(str) {
     var base64 = str.replace(/-/g, '+').replace(/_/g, '/');
@@ -161,11 +165,34 @@ function redirectToAuth(originalPath, host) {
     };
 }
 
+// Redirect to refresh endpoint for silent token renewal.
+function redirectToRefresh(originalPath, host) {
+    var returnTo = originalPath;
+    if (host) {
+        returnTo = 'https://' + host + originalPath;
+    }
+    return {
+        statusCode: 302,
+        headers: {
+            location: { value: '/oauth2/refresh?return_to=' + encodeURIComponent(returnTo) },
+            'cache-control': { value: 'no-store' }
+        }
+    };
+}
+
 async function handler(event) {
     var request = event.request;
+
+    // Strip externally-provided identity headers (prevents spoofing from outside CloudFront)
+    if (ENABLE_HEADER_INJECTION) {
+        var headersToStrip = HEADER_INJECTION_KEYS;
+        for (var h = 0; h < headersToStrip.length; h++) {
+            delete request.headers[headersToStrip[h]];
+        }
+    }
     
     // Skip auth check for OAuth callback path
-    if (request.uri === '/oauth2/callback') {
+    if (request.uri.indexOf('/oauth2/') === 0) {
         return request;
     }
     
@@ -201,6 +228,9 @@ async function handler(event) {
         var now = Math.floor(Date.now() / 1000);
         
         if (payload.exp && payload.exp < now) {
+            if (ENABLE_REFRESH) {
+                return redirectToRefresh(originalPath, host);
+            }
             return redirectToAuth(originalPath, host);
         }
         
@@ -215,6 +245,20 @@ async function handler(event) {
                 }
             } catch (e) {
                 console.log('KVS error checking revocation: ' + e);
+            }
+        }
+
+        // Inject identity claims as headers for origin (when enabled)
+        if (ENABLE_HEADER_INJECTION) {
+            var mapping = HEADER_INJECTION_MAP;
+            for (var headerName in mapping) {
+                if (mapping.hasOwnProperty(headerName)) {
+                    var claimKey = mapping[headerName];
+                    var claimValue = payload[claimKey];
+                    if (claimValue !== undefined && claimValue !== null) {
+                        request.headers[headerName] = { value: String(claimValue) };
+                    }
+                }
             }
         }
         

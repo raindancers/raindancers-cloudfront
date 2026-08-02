@@ -75,6 +75,20 @@ export interface CloudFrontWithAzureAuthSplitProps<TRole extends string = string
   readonly accessLogExpirationDays?: number;
   /** Require MFA (amr claim must contain 'mfa'). Defence in depth — primary enforcement should be via Entra Conditional Access. @default false */
   readonly requireMfa?: boolean;
+  /** Enable stripping and injection of identity claim headers on origin-bound requests. @default false */
+  readonly enableHeaderInjection?: boolean;
+  /** Map of HTTP header name to JWT claim key for header injection. Only used when enableHeaderInjection is true. e.g. { 'x-customer-id': 'customer_id', 'x-customer-email': 'email' } */
+  readonly headerInjectionClaims?: Record<string, string>;
+  /** Enable the /oauth2/refresh endpoint for silent token renewal. When true, expired-but-valid tokens redirect to refresh instead of Entra login. @default false */
+  readonly enableRefreshEndpoint?: boolean;
+  /** Enable the /oauth2/logout endpoint for explicit session termination. When true, deploys a Logout Lambda that clears cookies, revokes the session, and redirects to Entra /logout. @default false */
+  readonly enableLogoutEndpoint?: boolean;
+  /** URL for the post-auth identity hook. Called after successful token exchange to resolve application-specific claims (e.g., customer_id). Must be an internal URL (ALB/Lambda). @default undefined (no hook) */
+  readonly postAuthHookUrl?: string;
+  /** Timeout in seconds for the post-auth identity hook call. @default 3 */
+  readonly postAuthHookTimeout?: number;
+  /** Whether to fail closed (deny auth) if the post-auth hook returns an error or is unavailable. @default true */
+  readonly postAuthHookFailClosed?: boolean;
 }
 
 export class SecuredCloudFront<TRole extends string = string> extends constructs.Construct {
@@ -99,6 +113,9 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
   private readonly cookieDomain: string;
   private readonly kvs: cloudfront.IKeyValueStore;
   private readonly requireMfa: boolean;
+  private readonly enableHeaderInjection: boolean;
+  private readonly headerInjectionClaims: Record<string, string>;
+  private readonly enableRefreshEndpoint: boolean;
 
   constructor(scope: constructs.Construct, id: string, props: CloudFrontWithAzureAuthSplitProps<TRole>) {
     super(scope, id);
@@ -156,6 +173,12 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
       resources: ['*'],
     }));
 
+    this.lambdaEdgeRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudfront-keyvaluestore:PutKey', 'cloudfront-keyvaluestore:DescribeKeyValueStore'],
+      resources: [kvsArn],
+    }));
+
     const kvs = cloudfront.KeyValueStore.fromKeyValueStoreArn(this, 'KVS', kvsArn);
     this.kvs = kvs;
     this.tenantId = tenantId;
@@ -163,6 +186,9 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
     this.redirectUri = redirectUri;
     this.cookieDomain = props.cookieDomain || '';
     this.requireMfa = props.requireMfa ?? false;
+    this.enableHeaderInjection = props.enableHeaderInjection ?? false;
+    this.headerInjectionClaims = props.headerInjectionClaims ?? {};
+    this.enableRefreshEndpoint = props.enableRefreshEndpoint ?? false;
 
     const configPyContent = `# Generated configuration
 import json
@@ -297,6 +323,111 @@ def get_config():
           enableAcceptEncodingGzip: false,
           enableAcceptEncodingBrotli: false,
         }),
+      };
+    }
+
+    // Deploy Refresh Lambda when enableRefreshEndpoint is true
+    if (this.enableRefreshEndpoint) {
+      const refreshFunction = new cloudfront.experimental.EdgeFunction(this, 'RefreshEndpoint', {
+        runtime: lambda.Runtime.PYTHON_3_11,
+        handler: 'index.lambda_handler',
+        code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/refresh'), {
+          bundling: {
+            local: {
+              tryBundle(outputDir: string): boolean {
+                const sourceDir = path.join(__dirname, '../lambda/refresh');
+                const sourceFiles = fs.readdirSync(sourceDir);
+                for (const file of sourceFiles) {
+                  if (file === 'requirements.txt') continue;
+                  fs.cpSync(path.join(sourceDir, file), path.join(outputDir, file), { recursive: true });
+                }
+                fs.writeFileSync(path.join(outputDir, 'config_generated.py'), configPyContent);
+                return true;
+              },
+            },
+            image: lambda.Runtime.PYTHON_3_11.bundlingImage,
+            command: ['bash', '-c', 'cp -r . /asset-output && cp /tmp/config_generated.py /asset-output/config_generated.py'],
+            volumes: [{ hostPath: configPyPath, containerPath: '/tmp/config_generated.py' }],
+          },
+        }),
+        timeout: core.Duration.seconds(30),
+        memorySize: 128,
+        role: this.lambdaEdgeRole,
+      });
+
+      additionalBehaviors['/oauth2/refresh'] = {
+        origin: props.defaultBehavior.origin,
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        edgeLambdas: [{
+          functionVersion: refreshFunction.currentVersion,
+          eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+        }],
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      };
+    }
+
+    // Deploy Logout Lambda when enableLogoutEndpoint is true
+    if (props.enableLogoutEndpoint) {
+      // Logout Lambda needs KVS ARN for session revocation — baked into its config
+      const logoutConfigPyContent = `# Generated configuration for Logout Lambda
+import json
+import boto3
+import logging
+
+logger = logging.getLogger()
+
+CONFIG_SECRET_NAME = 'cloudfront-auth-config-${props.domainNames[0]}'
+CONFIG_REGION = '${props.authRegion}'
+KVS_ARN = '${kvsArn}'
+
+def get_config():
+    logger.info(f'Loading config from Secrets Manager: {CONFIG_SECRET_NAME} in {CONFIG_REGION}')
+    try:
+        client = boto3.client('secretsmanager', region_name=CONFIG_REGION)
+        response = client.get_secret_value(SecretId=CONFIG_SECRET_NAME)
+        config = json.loads(response['SecretString'])
+        config['kvs_arn'] = KVS_ARN
+        return config
+    except Exception as e:
+        logger.error(f'Failed to get secret: {e}')
+        raise
+`;
+
+      const logoutFunction = new cloudfront.experimental.EdgeFunction(this, 'LogoutEndpoint', {
+        runtime: lambda.Runtime.PYTHON_3_11,
+        handler: 'index.lambda_handler',
+        code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/logout'), {
+          bundling: {
+            local: {
+              tryBundle(outputDir: string): boolean {
+                const sourceDir = path.join(__dirname, '../lambda/logout');
+                const sourceFiles = fs.readdirSync(sourceDir);
+                for (const file of sourceFiles) {
+                  if (file === 'requirements.txt') continue;
+                  fs.cpSync(path.join(sourceDir, file), path.join(outputDir, file), { recursive: true });
+                }
+                fs.writeFileSync(path.join(outputDir, 'config_generated.py'), logoutConfigPyContent);
+                return true;
+              },
+            },
+            image: lambda.Runtime.PYTHON_3_11.bundlingImage,
+            command: ['bash', '-c', 'cp -r . /asset-output && cp /tmp/config_generated.py /asset-output/config_generated.py'],
+            volumes: [{ hostPath: configPyPath, containerPath: '/tmp/config_generated.py' }],
+          },
+        }),
+        timeout: core.Duration.seconds(30),
+        memorySize: 128,
+        role: this.lambdaEdgeRole,
+      });
+
+      additionalBehaviors['/oauth2/logout'] = {
+        origin: props.defaultBehavior.origin,
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        edgeLambdas: [{
+          functionVersion: logoutFunction.currentVersion,
+          eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+        }],
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       };
     }
 
@@ -485,6 +616,9 @@ def get_config():
         redirectUri: this.redirectUri,
         cookieDomain: this.cookieDomain,
         requireMfa: this.requireMfa,
+        enableHeaderInjection: this.enableHeaderInjection,
+        headerInjectionClaims: this.headerInjectionClaims,
+        enableRefresh: this.enableRefreshEndpoint,
       });
 
       // Create CloudFront Function
@@ -566,6 +700,15 @@ def get_config():
     code = code.replace('CLIENT_ID_PLACEHOLDER', clientId);
     code = code.replace('REDIRECT_URI_PLACEHOLDER', redirectUri);
     code = code.replace('COOKIE_DOMAIN_PLACEHOLDER', this.cookieDomain);
+    code = code.replace(/ENABLE_HEADER_INJECTION_PLACEHOLDER/g, String(this.enableHeaderInjection));
+    if (this.enableHeaderInjection && Object.keys(this.headerInjectionClaims).length > 0) {
+      code = code.replace(/HEADER_INJECTION_MAP_PLACEHOLDER/g, JSON.stringify(this.headerInjectionClaims));
+      code = code.replace(/HEADER_INJECTION_KEYS_PLACEHOLDER/g, JSON.stringify(Object.keys(this.headerInjectionClaims)));
+    } else {
+      code = code.replace(/HEADER_INJECTION_MAP_PLACEHOLDER/g, '{}');
+      code = code.replace(/HEADER_INJECTION_KEYS_PLACEHOLDER/g, '[]');
+    }
+    code = code.replace(/ENABLE_REFRESH_PLACEHOLDER/g, String(this.enableRefreshEndpoint));
     return code;
   }
 

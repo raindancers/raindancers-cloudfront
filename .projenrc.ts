@@ -13,9 +13,14 @@ const project = new typescript.TypeScriptProject({
     'aws-cdk-lib@^2.244.0',
     'constructs@^10.5.0',
   ],
+  deps: [
+    'terser',
+  ],
   devDeps: [
     'aws-cdk-lib@2.244.0',
     'constructs@10.5.0',
+    'fast-check',
+    '@types/terser',
   ],
 });
 

@@ -1,0 +1,3 @@
+# Refresh Lambda dependencies
+# boto3 is provided by the Lambda runtime — no additional packages needed.
+# This file exists for consistency with the bundling pattern.

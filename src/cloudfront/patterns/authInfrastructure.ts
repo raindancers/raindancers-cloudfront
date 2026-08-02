@@ -58,6 +58,14 @@ export interface AuthInfrastructureProps {
   readonly auditLogRetentionDays?: number;
   readonly auditArchiveRetentionDays?: number;
   readonly removalPolicy?: core.RemovalPolicy;
+  /** URL for the post-auth identity hook. @default undefined */
+  readonly postAuthHookUrl?: string;
+  /** Timeout in seconds for the post-auth hook. @default 3 */
+  readonly postAuthHookTimeout?: number;
+  /** Fail closed if hook is unavailable. @default true */
+  readonly postAuthHookFailClosed?: boolean;
+  /** Enable refresh token storage. @default false */
+  readonly enableRefresh?: boolean;
 }
 
 export class AuthInfrastructure extends constructs.Construct {
@@ -97,6 +105,10 @@ export class AuthInfrastructure extends constructs.Construct {
       autoRevokeOnReuse: props.autoRevokeOnReuse,
       jwtClaimsWhitelist: props.jwtClaimsWhitelist,
       cookieDomain: props.cookieDomain,
+      postAuthHookUrl: props.postAuthHookUrl,
+      postAuthHookTimeout: props.postAuthHookTimeout,
+      postAuthHookFailClosed: props.postAuthHookFailClosed,
+      enableRefresh: props.enableRefresh,
     });
 
     const auditLogRetentionDays = props.auditLogRetentionDays ?? 30;

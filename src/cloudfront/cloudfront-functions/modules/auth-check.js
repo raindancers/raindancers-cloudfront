@@ -6,6 +6,10 @@ const AZURE_TENANT_ID = 'TENANT_ID_PLACEHOLDER';
 const AZURE_CLIENT_ID = 'CLIENT_ID_PLACEHOLDER';
 const REDIRECT_URI = 'REDIRECT_URI_PLACEHOLDER';
 const COOKIE_DOMAIN = 'COOKIE_DOMAIN_PLACEHOLDER';
+const ENABLE_HEADER_INJECTION = ENABLE_HEADER_INJECTION_PLACEHOLDER;
+const HEADER_INJECTION_MAP = HEADER_INJECTION_MAP_PLACEHOLDER;
+const HEADER_INJECTION_KEYS = HEADER_INJECTION_KEYS_PLACEHOLDER;
+const ENABLE_REFRESH = ENABLE_REFRESH_PLACEHOLDER;
 
 function base64urlDecode(str) {
   var base64 = str.replace(/-/g, '+').replace(/_/g, '/');
@@ -153,9 +157,31 @@ function redirectToAuth(originalPath, host) {
   };
 }
 
+// Redirect to the refresh endpoint for silent token renewal.
+function redirectToRefresh(originalPath, host) {
+  var returnTo = host ? 'https://' + host + originalPath : originalPath;
+  return {
+    statusCode: 302,
+    headers: {
+      location: { value: '/oauth2/refresh?return_to=' + encodeURIComponent(returnTo) },
+      'cache-control': { value: 'no-store' }
+    }
+  };
+}
+
 async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
   var request = event.request;
-  if (request.uri === '/oauth2/callback') {
+
+  // Strip externally-provided identity headers from ALL requests (prevents spoofing).
+  // These headers are ONLY set by this function from validated JWT claims.
+  if (ENABLE_HEADER_INJECTION) {
+    var headersToStrip = HEADER_INJECTION_KEYS;
+    for (var h = 0; h < headersToStrip.length; h++) {
+      delete request.headers[headersToStrip[h]];
+    }
+  }
+
+  if (request.uri.indexOf('/oauth2/') === 0) {
     return { pass: true, payload: null };
   }
   if (decodedPayload) {
@@ -196,6 +222,13 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
     var payload = JSON.parse(base64urlDecode(parts[1]));
     var now = Math.floor(Date.now() / 1000);
     if (payload.exp && payload.exp < now) {
+      if (ENABLE_REFRESH) {
+        // Token is expired but signature was valid — redirect to refresh endpoint
+        return {
+          pass: false,
+          response: redirectToRefresh(originalPath, host)
+        };
+      }
       return {
         pass: false,
         response: redirectToAuth(originalPath, host)
@@ -258,11 +291,26 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
 }
 
 function injectAzureToken(request, cookies) {
-  var azureToken = cookies['__Host-azure_token'];
+  var azureToken = cookies['__Host-azure_token'] || cookies['__Secure-azure_token'];
   if (azureToken && azureToken.value) {
     request.headers['x-azure-token'] = {
       value: azureToken.value
     };
+  }
+  return request;
+}
+
+// Inject identity claims from validated JWT payload into request headers.
+function injectClaimsHeaders(request, payload) {
+  if (!ENABLE_HEADER_INJECTION || !payload) return request;
+  var mapping = HEADER_INJECTION_MAP;
+  for (var headerName in mapping) {
+    if (mapping.hasOwnProperty(headerName)) {
+      var val = payload[mapping[headerName]];
+      if (val !== undefined && val !== null) {
+        request.headers[headerName] = { value: String(val) };
+      }
+    }
   }
   return request;
 }

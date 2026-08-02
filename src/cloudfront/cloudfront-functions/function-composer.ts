@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { minify_sync } from 'terser';
 import { Extension, ExtensionConfig, RoleMatchMode } from '../patterns/securedCloudFront';
 
 export interface ComposerConfig {
@@ -9,6 +10,12 @@ export interface ComposerConfig {
   readonly redirectUri?: string;
   readonly cookieDomain?: string;
   readonly requireMfa?: boolean;
+  /** Enable header stripping and injection from JWT claims. @default false */
+  readonly enableHeaderInjection?: boolean;
+  /** Map of header name → JWT claim key. e.g. { 'x-customer-id': 'customer_id' } */
+  readonly headerInjectionClaims?: Record<string, string>;
+  /** Enable refresh redirect for expired-but-valid tokens. @default false */
+  readonly enableRefresh?: boolean;
 }
 
 /**
@@ -63,6 +70,23 @@ export class FunctionComposer {
         if (composerConfig.cookieDomain !== undefined) {
           authModule = authModule.replace(/COOKIE_DOMAIN_PLACEHOLDER/g, composerConfig.cookieDomain);
         }
+
+        // Header injection placeholders
+        const enableHeaderInjection = composerConfig.enableHeaderInjection ?? false;
+        authModule = authModule.replace(/ENABLE_HEADER_INJECTION_PLACEHOLDER/g, String(enableHeaderInjection));
+
+        if (enableHeaderInjection && composerConfig.headerInjectionClaims) {
+          const map = composerConfig.headerInjectionClaims;
+          authModule = authModule.replace(/HEADER_INJECTION_MAP_PLACEHOLDER/g, JSON.stringify(map));
+          authModule = authModule.replace(/HEADER_INJECTION_KEYS_PLACEHOLDER/g, JSON.stringify(Object.keys(map)));
+        } else {
+          authModule = authModule.replace(/HEADER_INJECTION_MAP_PLACEHOLDER/g, '{}');
+          authModule = authModule.replace(/HEADER_INJECTION_KEYS_PLACEHOLDER/g, '[]');
+        }
+
+        // Refresh redirect placeholder
+        const enableRefresh = composerConfig.enableRefresh ?? false;
+        authModule = authModule.replace(/ENABLE_REFRESH_PLACEHOLDER/g, String(enableRefresh));
       }
       parts.push(authModule);
       checks.push('auth');
@@ -71,7 +95,39 @@ export class FunctionComposer {
     // Generate handler function
     parts.push(this.generateHandler(checks, config, composerConfig));
 
-    const code = parts.join('\n\n');
+    let assembled = parts.join('\n\n');
+
+    // Extract the CloudFront-specific import (terser can't parse ES module imports in script mode).
+    // We'll prepend it back after minification.
+    const cfImport = "import cf from 'cloudfront';\n";
+    assembled = assembled.replace(/import cf from 'cloudfront';\s*/g, '');
+
+    // Also extract `var crypto = require('crypto');` — terser handles it fine but
+    // CloudFront Functions need it at the top level.
+    const cryptoRequire = "var crypto = require('crypto');\n";
+    assembled = assembled.replace(/var crypto = require\('crypto'\);\s*/g, '');
+
+    // Extract KVS handle declaration (depends on cf import)
+    const kvsDecl = 'const kvsHandle = cf.kvs();\n';
+    assembled = assembled.replace(/const kvsHandle = cf\.kvs\(\);\s*/g, '');
+
+    // Minify with terser to stay well under the 10KB CloudFront Function limit.
+    const minified = minify_sync(assembled, {
+      compress: {
+        dead_code: true,
+        drop_console: false,
+        passes: 2,
+      },
+      mangle: {
+        reserved: ['handler', 'event', 'kvsHandle'],
+      },
+      format: {
+        comments: false,
+      },
+    });
+
+    // Prepend the CloudFront-specific preamble back
+    const code = cfImport + cryptoRequire + kvsDecl + (minified.code || assembled);
     const sizeKB = Buffer.byteLength(code, 'utf-8') / 1024;
 
     if (sizeKB > 10) {
@@ -130,6 +186,11 @@ export class FunctionComposer {
         '  // Inject Azure AD JWT for AssumeRoleWithWebIdentity (Azure only)',
         '  if (typeof injectAzureToken === \'function\') {',
         '    event.request = injectAzureToken(event.request, event.request.cookies);',
+        '  }',
+        '',
+        '  // Inject identity claims as headers for origin (when enabled)',
+        '  if (typeof injectClaimsHeaders === \'function\') {',
+        '    event.request = injectClaimsHeaders(event.request, decodedPayload);',
         '  }',
         '',
       );

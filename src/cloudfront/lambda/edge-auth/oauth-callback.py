@@ -415,6 +415,67 @@ def lambda_handler(event, context):
         # Create HMAC-signed session JWT
         logger.info('Step 3: Creating HMAC-signed session JWT')
         
+        # Post-auth identity hook: call external endpoint to resolve application-specific claims
+        # (e.g., Medusa customer_id). Only called when post_auth_hook_url is configured.
+        additional_claims = {}
+        post_auth_hook_url = config.get('post_auth_hook_url')
+        if post_auth_hook_url:
+            logger.info(f'Step 2.5: Calling post-auth identity hook: {post_auth_hook_url}')
+            hook_timeout = int(config.get('post_auth_hook_timeout', '3'))
+            hook_fail_closed = config.get('post_auth_hook_fail_closed', 'true').lower() == 'true'
+            try:
+                hook_body = json.dumps({
+                    'sub': payload.get('sub'),
+                    'email': payload.get('email'),
+                    'claims': {k: v for k, v in payload.items() if k not in ['aio', 'rh', 'uti', 'nonce']}
+                }).encode('utf-8')
+                hook_req = urllib.request.Request(
+                    post_auth_hook_url,
+                    data=hook_body,
+                    headers={'Content-Type': 'application/json'},
+                    method='POST'
+                )
+                with urllib.request.urlopen(hook_req, timeout=hook_timeout) as hook_response:
+                    hook_result = json.loads(hook_response.read().decode('utf-8'))
+                    additional_claims = hook_result.get('additional_claims', {})
+                    logger.info(f'Post-auth hook returned additional claims: {list(additional_claims.keys())}')
+                    
+                    # Check if hook signals a redirect (e.g., confirmation required)
+                    if 'error' in hook_result:
+                        logger.warning(f'Post-auth hook returned error: {hook_result["error"]}')
+                        hook_redirect = hook_result.get('redirect')
+                        if hook_redirect:
+                            return {
+                                'status': '302',
+                                'statusDescription': 'Found',
+                                'headers': {
+                                    'location': [{'key': 'Location', 'value': hook_redirect}],
+                                    'cache-control': [{'key': 'Cache-Control', 'value': 'no-store'}]
+                                }
+                            }
+                        if hook_fail_closed:
+                            return {
+                                'status': '403',
+                                'statusDescription': 'Forbidden',
+                                'body': 'Authentication denied by identity hook'
+                            }
+            except urllib.error.URLError as e:
+                logger.error(f'Post-auth hook request failed: {e}')
+                if hook_fail_closed:
+                    return {
+                        'status': '503',
+                        'statusDescription': 'Service Unavailable',
+                        'body': 'Identity resolution unavailable'
+                    }
+            except Exception as e:
+                logger.error(f'Post-auth hook unexpected error: {e}')
+                if hook_fail_closed:
+                    return {
+                        'status': '503',
+                        'statusDescription': 'Service Unavailable',
+                        'body': 'Identity resolution unavailable'
+                    }
+        
         # Generate unique session ID (jti)
         jti = f"sess_{uuid.uuid4().hex}"
         user_id = payload.get('sub') or payload.get('email') or payload.get('preferred_username')
@@ -436,6 +497,7 @@ def lambda_handler(event, context):
         azure_exp = payload.get('exp', int(time.time()) + 3600)
         session_payload = {
             **filtered_payload,
+            **additional_claims,  # Merge claims from post-auth identity hook
             "jti": jti,
             "exp": azure_exp,  # Match Azure AD expiration
             "iat": int(time.time()),
@@ -464,6 +526,28 @@ def lambda_handler(event, context):
                 logger.info(f'Session stored in DynamoDB: {jti}')
             except Exception as e:
                 logger.error(f'Failed to store session in DynamoDB: {e}')
+        
+        # Store Entra refresh token for silent session renewal (only when refresh is enabled)
+        enable_refresh = config.get('enable_refresh', 'false').lower() == 'true'
+        refresh_token = token_response.get('refresh_token')
+        if enable_refresh and refresh_token and table_name:
+            try:
+                refresh_ttl = int(time.time()) + (30 * 24 * 60 * 60)  # 30 days
+                dynamodb.put_item(
+                    TableName=table_name,
+                    Item={
+                        'pk': {'S': f'REFRESH#{jti}'},
+                        'sk': {'S': f'REFRESH#{jti}'},
+                        'refresh_token': {'S': refresh_token},
+                        'user_id': {'S': user_id or ''},
+                        'customer_id': {'S': additional_claims.get('customer_id', '')},
+                        'createdAt': {'N': str(int(time.time()))},
+                        'expiresAt': {'N': str(refresh_ttl)}
+                    }
+                )
+                logger.info(f'Refresh token stored in DynamoDB: REFRESH#{jti}')
+            except Exception as e:
+                logger.error(f'Failed to store refresh token in DynamoDB: {e}')
         
         header_b64 = base64.urlsafe_b64encode(
             json.dumps(header, separators=(',', ':')).encode()

@@ -19,6 +19,14 @@ export interface AuthSecretManagerProps {
   readonly securityAlertsTopicArn?: string;
   readonly autoRevokeOnReuse?: boolean;
   readonly jwtClaimsWhitelist?: string[];
+  /** URL for the post-auth identity hook. Called after token exchange to resolve app-specific claims. @default undefined (no hook) */
+  readonly postAuthHookUrl?: string;
+  /** Timeout in seconds for the post-auth hook call. @default 3 */
+  readonly postAuthHookTimeout?: number;
+  /** Whether to deny auth if the hook fails or is unavailable. @default true */
+  readonly postAuthHookFailClosed?: boolean;
+  /** Whether to store refresh tokens for silent session renewal. @default false */
+  readonly enableRefresh?: boolean;
 }
 
 export class AuthSecretManager extends constructs.Construct {
@@ -68,6 +76,10 @@ export class AuthSecretManager extends constructs.Construct {
           jwt_claims_whitelist: JSON.stringify(jwtClaimsWhitelist),
           allowed_domains: JSON.stringify([props.domainName]),
           cookie_domain: props.cookieDomain || '',
+          post_auth_hook_url: props.postAuthHookUrl || '',
+          post_auth_hook_timeout: String(props.postAuthHookTimeout ?? 3),
+          post_auth_hook_fail_closed: (props.postAuthHookFailClosed ?? true) ? 'true' : 'false',
+          enable_refresh: props.enableRefresh ? 'true' : 'false',
         }),
         generateStringKey: 'hmac_key',
         excludePunctuation: true,
