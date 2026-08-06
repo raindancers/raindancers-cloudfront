@@ -78,7 +78,7 @@ describe('Property 2: State Parameter Validation Invariant', () => {
         expect(decoded!.path).toBe(path);
         expect(decoded!.host).toBe(host);
       }),
-      { numRuns: 200 }
+      { numRuns: 200 },
     );
   });
 
@@ -91,7 +91,7 @@ describe('Property 2: State Parameter Validation Invariant', () => {
         // Same inputs should produce different states (random component)
         expect(state1).not.toBe(state2);
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 
@@ -107,7 +107,7 @@ describe('Property 2: State Parameter Validation Invariant', () => {
         // No whitespace or control chars
         expect(state).toMatch(/^[A-Za-z0-9_-]+$/);
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 
@@ -150,7 +150,7 @@ describe('Property 2: State Parameter Validation Invariant', () => {
         }
         // No assertion needed — we're just verifying it doesn't crash
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 });

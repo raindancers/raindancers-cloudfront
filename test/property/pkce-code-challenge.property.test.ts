@@ -10,8 +10,8 @@
  * Tagged: Feature: externalId, Property 1: PKCE Code Challenge Correctness
  * Validates: Requirements 1.1
  */
-import * as fc from 'fast-check';
 import * as crypto from 'crypto';
+import * as fc from 'fast-check';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Replicate the auth-check.js PKCE functions (same logic, TypeScript version)
@@ -49,7 +49,7 @@ function generateCodeVerifier(): string {
 // fast-check arbitrary for PKCE code verifiers (RFC 7636: 43-128 chars from valid charset)
 const pkceVerifierArb = fc.array(
   fc.integer({ min: 0, max: PKCE_CHARSET.length - 1 }),
-  { minLength: 43, maxLength: 128 }
+  { minLength: 43, maxLength: 128 },
 ).map((indices) => indices.map((i) => PKCE_CHARSET[i]).join(''));
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,7 +67,7 @@ describe('Property 1: PKCE Code Challenge Correctness', () => {
 
         expect(challenge).toBe(expected);
       }),
-      { numRuns: 200 }
+      { numRuns: 200 },
     );
   });
 
@@ -82,7 +82,7 @@ describe('Property 1: PKCE Code Challenge Correctness', () => {
         // SHA-256 → 32 bytes → base64url = 43 chars (no padding)
         expect(challenge.length).toBe(43);
       }),
-      { numRuns: 200 }
+      { numRuns: 200 },
     );
   });
 
@@ -94,7 +94,7 @@ describe('Property 1: PKCE Code Challenge Correctness', () => {
         const c2 = generateCodeChallenge(v2);
         expect(c1).not.toBe(c2);
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 

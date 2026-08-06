@@ -10,8 +10,8 @@
  * Tagged: Feature: externalId, Property 3: Protected Route Redirect Completeness
  * Validates: Requirements 3.1
  */
-import * as fc from 'fast-check';
 import * as crypto from 'crypto';
+import * as fc from 'fast-check';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Replicate the relevant auth-check.js logic
@@ -65,7 +65,7 @@ function redirectToAuth(originalPath: string, host: string) {
   return {
     statusCode: 302,
     headers: {
-      location: { value: buildAzureAuthUrl(state, codeChallenge) },
+      'location': { value: buildAzureAuthUrl(state, codeChallenge) },
       'cache-control': { value: 'no-store' },
     },
     cookies: {
@@ -101,7 +101,7 @@ describe('Property 3: Protected Route Redirect Completeness', () => {
         expect(response.headers.location.value).toContain('oauth2/v2.0/authorize');
         expect(response.headers['cache-control'].value).toBe('no-store');
       }),
-      { numRuns: 200 }
+      { numRuns: 200 },
     );
   });
 
@@ -118,7 +118,7 @@ describe('Property 3: Protected Route Redirect Completeness', () => {
         expect(url).toContain('response_type=code');
         expect(url).toContain('state=');
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 
@@ -136,7 +136,7 @@ describe('Property 3: Protected Route Redirect Completeness', () => {
         expect(response.cookies.code_verifier.attributes).toContain('HttpOnly');
         expect(response.cookies.code_verifier.attributes).toContain('Secure');
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 
@@ -154,7 +154,7 @@ describe('Property 3: Protected Route Redirect Completeness', () => {
         expect(decoded.p).toBe(path);
         expect(decoded.h).toBe(host);
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 });

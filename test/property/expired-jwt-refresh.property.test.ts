@@ -10,8 +10,8 @@
  * Tagged: Feature: externalId, Property 10: Expired JWT Triggers Refresh
  * Validates: Requirements 3.2, 7.2
  */
-import * as fc from 'fast-check';
 import * as crypto from 'crypto';
+import * as fc from 'fast-check';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JWT helpers
@@ -104,9 +104,9 @@ describe('Property 10: Expired JWT Triggers Refresh', () => {
             expect(result.returnTo).toContain(path);
             expect(result.returnTo).toContain(host);
           }
-        }
+        },
       ),
-      { numRuns: 200 }
+      { numRuns: 200 },
     );
   });
 
@@ -122,9 +122,9 @@ describe('Property 10: Expired JWT Triggers Refresh', () => {
           const result = evaluateExpiredJwt(token, TEST_SECRET, false, '/store', 'example.com');
 
           expect(result.action).toBe('login_redirect');
-        }
+        },
       ),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 
@@ -141,9 +141,9 @@ describe('Property 10: Expired JWT Triggers Refresh', () => {
           const result = evaluateExpiredJwt(token, TEST_SECRET, refreshEnabled, '/store', 'example.com');
 
           expect(result.action).toBe('pass');
-        }
+        },
       ),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 
@@ -160,9 +160,9 @@ describe('Property 10: Expired JWT Triggers Refresh', () => {
 
           // Invalid HMAC → never trust the token, even for refresh
           expect(result.action).toBe('login_redirect');
-        }
+        },
       ),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 });

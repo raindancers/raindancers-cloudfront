@@ -68,9 +68,9 @@ describe('Property 4: Public Route Pass-Through', () => {
         (path, hasSession) => {
           const result = simulateAuthCheck(path, hasSession);
           expect(result.pass).toBe(true);
-        }
+        },
       ),
-      { numRuns: 200 }
+      { numRuns: 200 },
     );
   });
 
@@ -93,7 +93,7 @@ describe('Property 4: Public Route Pass-Through', () => {
         const result = simulateAuthCheck(path, false);
         expect(result.pass).toBe(false);
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 

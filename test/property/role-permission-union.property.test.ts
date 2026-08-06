@@ -17,7 +17,7 @@ import * as fc from 'fast-check';
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum RoleMatchMode {
-  OR = 'OR',   // Any matching role grants access
+  OR = 'OR', // Any matching role grants access
   AND = 'AND', // ALL required roles must be present
 }
 
@@ -78,9 +78,9 @@ describe('Property 11: Role Permission Union (OR mode)', () => {
 
           const granted = checkRoleAccess(userRoles, requiredRoles, RoleMatchMode.OR);
           expect(granted).toBe(true);
-        }
+        },
       ),
-      { numRuns: 200 }
+      { numRuns: 200 },
     );
   });
 
@@ -99,9 +99,9 @@ describe('Property 11: Role Permission Union (OR mode)', () => {
 
           const granted = checkRoleAccess(userRoles, requiredRoles, RoleMatchMode.OR);
           expect(granted).toBe(false);
-        }
+        },
       ),
-      { numRuns: 200 }
+      { numRuns: 200 },
     );
   });
 
@@ -111,7 +111,7 @@ describe('Property 11: Role Permission Union (OR mode)', () => {
         const granted = checkRoleAccess(userRoles, [], RoleMatchMode.OR);
         expect(granted).toBe(true);
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 
@@ -123,7 +123,7 @@ describe('Property 11: Role Permission Union (OR mode)', () => {
         const granted = checkRoleAccess(userRoles, requiredRoles, RoleMatchMode.OR);
         expect(granted).toBe(true);
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 });
@@ -136,7 +136,7 @@ describe('Property 11: Role Permission Union (AND mode)', () => {
         const granted = checkRoleAccess(userRoles, requiredRoles, RoleMatchMode.AND);
         expect(granted).toBe(true);
       }),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 
@@ -152,9 +152,9 @@ describe('Property 11: Role Permission Union (AND mode)', () => {
 
           const granted = checkRoleAccess(userRoles, requiredRoles, RoleMatchMode.AND);
           expect(granted).toBe(false);
-        }
+        },
       ),
-      { numRuns: 100 }
+      { numRuns: 100 },
     );
   });
 });
@@ -174,9 +174,9 @@ describe('Role access: ADMIN fallback pattern', () => {
           const adminUser = [ADMIN_ROLE];
 
           expect(checkRoleAccess(adminUser, requiredRoles, RoleMatchMode.OR)).toBe(true);
-        }
+        },
       ),
-      { numRuns: 50 }
+      { numRuns: 50 },
     );
   });
 
