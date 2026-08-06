@@ -18,9 +18,9 @@ export interface CrossAccountDnsValidatedCertificateProps {
 
 export class CrossAccountDnsValidatedCertificate extends constructs.Construct {
 
-  public readonly certificateArn: string;
-
   private static readonly SINGLETON_KEY = 'CrossAccountDnsValidatedCertificateFunction';
+
+  public readonly certificateArn: string;
 
   constructor(scope: constructs.Construct, id: string, props: CrossAccountDnsValidatedCertificateProps) {
     super(scope, id);
