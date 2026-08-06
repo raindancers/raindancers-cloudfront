@@ -1,5 +1,7 @@
 export * from './cloudfrontCertificate';
 export * from './cloudfrontWebAcl';
+export * from './crossAccountRoute53Record';
+export * from './crossAccountDnsValidatedCertificate';
 export * from './syncSecretToKvs';
 export * from './oauthEdgeRole';
 export * from './authSecurityTable';
