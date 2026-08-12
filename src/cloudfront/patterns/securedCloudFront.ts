@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -14,6 +15,43 @@ import {
 import * as constructs from 'constructs';
 import { AuthSecurityTable } from '../authSecurityTable';
 import { FunctionComposer } from '../cloudfront-functions/function-composer';
+
+/**
+ * Compute a deterministic hash for a Lambda asset bundle based on source
+ * directory contents and generated config. This prevents spurious Lambda
+ * version rotations on every CDK synth.
+ */
+function computeAssetHash(sourceDir: string, generatedConfig: string): string {
+  const hash = crypto.createHash('sha256');
+  hash.update(generatedConfig);
+
+  // Hash all source files deterministically (sorted by name)
+  const files = fs.readdirSync(sourceDir).sort();
+  for (const file of files) {
+    const filePath = path.join(sourceDir, file);
+    const stat = fs.statSync(filePath);
+    if (stat.isFile()) {
+      hash.update(file);
+      hash.update(fs.readFileSync(filePath));
+    }
+  }
+
+  // Include pre-bundled deps hash if they exist
+  const bundledDepsDir = path.join(sourceDir, '../../lambda-bundled', path.basename(sourceDir));
+  if (fs.existsSync(bundledDepsDir)) {
+    const depFiles = fs.readdirSync(bundledDepsDir).sort();
+    for (const file of depFiles) {
+      const filePath = path.join(bundledDepsDir, file);
+      const stat = fs.statSync(filePath);
+      if (stat.isFile()) {
+        hash.update(`dep:${file}`);
+        hash.update(fs.readFileSync(filePath));
+      }
+    }
+  }
+
+  return hash.digest('hex');
+}
 
 export enum Extension {
   REQUIRE_AUTH = 'REQUIRE_AUTH',
@@ -225,6 +263,8 @@ def get_config():
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'oauth-callback.lambda_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/edge-auth'), {
+        assetHash: computeAssetHash(path.join(__dirname, '../lambda/edge-auth'), configPyContent),
+        assetHashType: core.AssetHashType.CUSTOM,
         bundling: {
           local: {
             tryBundle(outputDir: string): boolean {
@@ -332,6 +372,8 @@ def get_config():
         runtime: lambda.Runtime.PYTHON_3_11,
         handler: 'index.lambda_handler',
         code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/refresh'), {
+          assetHash: computeAssetHash(path.join(__dirname, '../lambda/refresh'), configPyContent),
+          assetHashType: core.AssetHashType.CUSTOM,
           bundling: {
             local: {
               tryBundle(outputDir: string): boolean {
@@ -397,6 +439,8 @@ def get_config():
         runtime: lambda.Runtime.PYTHON_3_11,
         handler: 'index.lambda_handler',
         code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/logout'), {
+          assetHash: computeAssetHash(path.join(__dirname, '../lambda/logout'), logoutConfigPyContent),
+          assetHashType: core.AssetHashType.CUSTOM,
           bundling: {
             local: {
               tryBundle(outputDir: string): boolean {
