@@ -343,6 +343,11 @@ def get_config():
     const additionalBehaviors: Record<string, cloudfront.BehaviorOptions> = {};
 
     if (props.createOAuthCallback !== false) {
+      // Retain old Lambda@Edge versions — CloudFront edge replicas take up to
+      // several hours to drain after a version change, and CloudFormation cannot
+      // delete a version that is still replicated. Retaining prevents deploy failures.
+      oauthCallbackFunction.currentVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+
       additionalBehaviors['/oauth2/callback'] = {
         origin: props.defaultBehavior.origin,
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -396,6 +401,8 @@ def get_config():
         memorySize: 128,
         role: this.lambdaEdgeRole,
       });
+
+      refreshFunction.currentVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
 
       additionalBehaviors['/oauth2/refresh'] = {
         origin: props.defaultBehavior.origin,
@@ -463,6 +470,8 @@ def get_config():
         memorySize: 128,
         role: this.lambdaEdgeRole,
       });
+
+      logoutFunction.currentVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
 
       additionalBehaviors['/oauth2/logout'] = {
         origin: props.defaultBehavior.origin,

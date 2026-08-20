@@ -197,6 +197,9 @@ def get_config():
     this.functionComposer = new FunctionComposer();
     this.composedFunctions = new Map();
 
+    // Retain old Lambda@Edge versions — CloudFront edge replicas take hours to drain
+    oauthCallbackFn.currentVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+
     const oauthCallbackBehavior: cloudfront.BehaviorOptions = {
       origin: props.defaultBehavior.origin,
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
