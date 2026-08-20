@@ -346,7 +346,10 @@ def get_config():
       // Retain old Lambda@Edge versions — CloudFront edge replicas take up to
       // several hours to drain after a version change, and CloudFormation cannot
       // delete a version that is still replicated. Retaining prevents deploy failures.
-      oauthCallbackFunction.currentVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+      const callbackVersion = oauthCallbackFunction.currentVersion.node.defaultChild as core.CfnResource;
+      if (callbackVersion) {
+        callbackVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+      }
 
       additionalBehaviors['/oauth2/callback'] = {
         origin: props.defaultBehavior.origin,
@@ -402,7 +405,10 @@ def get_config():
         role: this.lambdaEdgeRole,
       });
 
-      refreshFunction.currentVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+      const refreshVersion = refreshFunction.currentVersion.node.defaultChild as core.CfnResource;
+      if (refreshVersion) {
+        refreshVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+      }
 
       additionalBehaviors['/oauth2/refresh'] = {
         origin: props.defaultBehavior.origin,
@@ -471,7 +477,10 @@ def get_config():
         role: this.lambdaEdgeRole,
       });
 
-      logoutFunction.currentVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+      const logoutVersion = logoutFunction.currentVersion.node.defaultChild as core.CfnResource;
+      if (logoutVersion) {
+        logoutVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+      }
 
       additionalBehaviors['/oauth2/logout'] = {
         origin: props.defaultBehavior.origin,
