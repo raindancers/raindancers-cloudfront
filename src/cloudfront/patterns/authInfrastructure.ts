@@ -57,6 +57,7 @@ export interface AuthInfrastructureProps {
   readonly hmacSecretRotationSchedule?: core.Duration;
   readonly auditLogRetentionDays?: number;
   readonly auditArchiveRetentionDays?: number;
+  readonly auditLogBucketName?: string;
   readonly removalPolicy?: core.RemovalPolicy;
   /** URL for the post-auth identity hook. @default undefined */
   readonly postAuthHookUrl?: string;
@@ -129,7 +130,7 @@ export class AuthInfrastructure extends constructs.Construct {
       kmsKey: secretManager.kmsKey,
       retentionDays: auditLogRetentionDays,
       archiveRetentionDays: auditArchiveRetentionDays,
-      bucketName: `auth-audit-logs-${core.Stack.of(this).account}-${core.Stack.of(this).region}`,
+      bucketName: props.auditLogBucketName ?? `auth-audit-logs-${core.Stack.of(this).account}-${core.Stack.of(this).region}`,
       databaseName: 'auth_audit_logs',
       removalPolicy: props.removalPolicy ?? core.RemovalPolicy.RETAIN,
     });
