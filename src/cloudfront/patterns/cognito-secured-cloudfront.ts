@@ -198,7 +198,10 @@ def get_config():
     this.composedFunctions = new Map();
 
     // Retain old Lambda@Edge versions — CloudFront edge replicas take hours to drain
-    oauthCallbackFn.currentVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+    const cognitoCallbackVersion = oauthCallbackFn.currentVersion.node.defaultChild as core.CfnResource;
+    if (cognitoCallbackVersion) {
+      cognitoCallbackVersion.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+    }
 
     const oauthCallbackBehavior: cloudfront.BehaviorOptions = {
       origin: props.defaultBehavior.origin,
