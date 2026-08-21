@@ -58,6 +58,9 @@ export interface AuthInfrastructureProps {
   readonly auditLogRetentionDays?: number;
   readonly auditArchiveRetentionDays?: number;
   readonly auditLogBucketName?: string;
+  readonly auditLogDatabaseName?: string;
+  /** ARN of an existing OIDC provider to reuse (skips creating a new one). Use when the same tenant already has a provider in this account. */
+  readonly existingOidcProviderArn?: string;
   readonly removalPolicy?: core.RemovalPolicy;
   /** URL for the post-auth identity hook. @default undefined */
   readonly postAuthHookUrl?: string;
@@ -131,15 +134,20 @@ export class AuthInfrastructure extends constructs.Construct {
       retentionDays: auditLogRetentionDays,
       archiveRetentionDays: auditArchiveRetentionDays,
       bucketName: props.auditLogBucketName ?? `auth-audit-logs-${core.Stack.of(this).account}-${core.Stack.of(this).region}`,
-      databaseName: 'auth_audit_logs',
+      databaseName: props.auditLogDatabaseName ?? 'auth_audit_logs',
       removalPolicy: props.removalPolicy ?? core.RemovalPolicy.RETAIN,
     });
 
-    const oidcProvider = new iam.OpenIdConnectProvider(this, 'OidcProvider', {
-      url: `https://login.microsoftonline.com/${props.tenantId}/v2.0`,
-      clientIds: [props.clientId],
-      thumbprints: [AZURE_AD_THUMBPRINT],
-    });
+    let oidcProvider: iam.IOpenIdConnectProvider;
+    if (props.existingOidcProviderArn) {
+      oidcProvider = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(this, 'OidcProvider', props.existingOidcProviderArn);
+    } else {
+      oidcProvider = new iam.OpenIdConnectProvider(this, 'OidcProvider', {
+        url: `https://login.microsoftonline.com/${props.tenantId}/v2.0`,
+        clientIds: [props.clientId],
+        thumbprints: [AZURE_AD_THUMBPRINT],
+      });
+    }
 
     this.configSecretArn = secretManager.configSecret.secretArn;
     this.kmsKeyArn = secretManager.kmsKey.keyArn;
