@@ -211,13 +211,20 @@ def lambda_handler(event, context):
             'body': 'Configuration error'
         }
     
-    # Validate Host header
+    # Validate Host header — accept the configured domains OR any subdomain of them.
+    # This supports a single zone-level config (e.g. alpha.example.com) serving
+    # multiple subdomains (payload./strapi./medusa.alpha.example.com) where the
+    # auth cookie is shared across subdomains via cookieDomain.
     host_header = None
     if 'host' in request.get('headers', {}):
         host_header = request['headers']['host'][0]['value']
-    
+
     if host_header and allowed_domains:
-        if host_header not in allowed_domains:
+        host_allowed = any(
+            host_header == d or host_header.endswith('.' + d)
+            for d in allowed_domains
+        )
+        if not host_allowed:
             logger.error(f'Host header validation failed: {host_header} not in allowed domains')
             return {
                 'status': '400',
