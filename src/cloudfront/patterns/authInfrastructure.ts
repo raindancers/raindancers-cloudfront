@@ -45,6 +45,8 @@ export interface AppSpec {
 export interface AuthInfrastructureProps {
   readonly ssmParamPrefix?: string;
   readonly zoneName: string;
+  /** Domains permitted as the request host during OAuth callback (e.g. subdomains served by the distribution). @default [zoneName] */
+  readonly allowedDomains?: string[];
   readonly tenantId: string;
   readonly clientId: string;
   readonly oauth2CallbackRoleName: string;
@@ -100,6 +102,7 @@ export class AuthInfrastructure extends constructs.Construct {
 
     const secretManager = new AuthSecretManager(this, 'SecretManager', {
       domainName: props.zoneName,
+      allowedDomains: props.allowedDomains,
       tableName: authSecurityTable.table.tableName,
       tableRegion: core.Stack.of(this).region,
       azureTenantId: props.tenantId,

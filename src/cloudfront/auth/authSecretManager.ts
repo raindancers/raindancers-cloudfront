@@ -16,6 +16,8 @@ export interface AuthSecretManagerProps {
   readonly azureClientId: string;
   readonly stsAudience: string;
   readonly cookieDomain?: string;
+  /** Domains permitted as the request host during OAuth callback. @default [domainName] */
+  readonly allowedDomains?: string[];
   readonly securityAlertsTopicArn?: string;
   readonly autoRevokeOnReuse?: boolean;
   readonly jwtClaimsWhitelist?: string[];
@@ -74,7 +76,7 @@ export class AuthSecretManager extends constructs.Construct {
           security_alerts_topic_arn: props.securityAlertsTopicArn || '',
           auto_revoke_on_reuse: props.autoRevokeOnReuse ? 'true' : 'false',
           jwt_claims_whitelist: JSON.stringify(jwtClaimsWhitelist),
-          allowed_domains: JSON.stringify([props.domainName]),
+          allowed_domains: JSON.stringify(props.allowedDomains ?? [props.domainName]),
           cookie_domain: props.cookieDomain || '',
           post_auth_hook_url: props.postAuthHookUrl || '',
           post_auth_hook_timeout: String(props.postAuthHookTimeout ?? 3),
