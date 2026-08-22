@@ -92,6 +92,13 @@ export interface CloudFrontWithAzureAuthSplitProps<TRole extends string = string
   readonly auditArchiveRetentionDays?: number;
   readonly authSsmParamPrefix: string;
   readonly authRegion: string;
+  /**
+   * Override the config secret name that the OAuth callback / logout / refresh
+   * Lambdas read. Defaults to `cloudfront-auth-config-${domainNames[0]}`.
+   * Set this when the AuthInfrastructure created the config secret under a
+   * different name (e.g. a shared zone name that serves multiple subdomains).
+   */
+  readonly authConfigSecretName?: string;
   readonly createOAuthCallback?: boolean;
   readonly defaultExtensions?: Extension[];
   readonly defaultExtensionConfig?: ExtensionConfig<TRole>;
@@ -238,7 +245,7 @@ logger = logging.getLogger()
 
 # Secret name and region - these must be concrete values, not CloudFormation tokens
 # The secret name is constructed from the domain name
-CONFIG_SECRET_NAME = 'cloudfront-auth-config-${props.domainNames[0]}'
+CONFIG_SECRET_NAME = '${props.authConfigSecretName ?? `cloudfront-auth-config-${props.domainNames[0]}`}'
 CONFIG_REGION = '${props.authRegion}'
 
 def get_config():
@@ -431,7 +438,7 @@ import logging
 
 logger = logging.getLogger()
 
-CONFIG_SECRET_NAME = 'cloudfront-auth-config-${props.domainNames[0]}'
+CONFIG_SECRET_NAME = '${props.authConfigSecretName ?? `cloudfront-auth-config-${props.domainNames[0]}`}'
 CONFIG_REGION = '${props.authRegion}'
 KVS_ARN = '${kvsArn}'
 
