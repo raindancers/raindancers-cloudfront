@@ -96,10 +96,13 @@ function generateState(originalPath, host) {
   return btoa(JSON.stringify(stateObj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
-function buildAzureAuthUrl(state, codeChallenge) {
+function buildAzureAuthUrl(state, codeChallenge, host) {
+  // Use the actual request host for redirect_uri so login returns to the
+  // originating subdomain. Falls back to the baked REDIRECT_URI if host is absent.
+  var redirectUri = host ? 'https://' + host + '/oauth2/callback' : REDIRECT_URI;
   var params = [
     'client_id=' + encodeURIComponent(AZURE_CLIENT_ID),
-    'redirect_uri=' + encodeURIComponent(REDIRECT_URI),
+    'redirect_uri=' + encodeURIComponent(redirectUri),
     'response_type=code',
     'scope=' + encodeURIComponent('openid profile email'),
     'state=' + encodeURIComponent(state),
@@ -141,7 +144,7 @@ function redirectToAuth(originalPath, host) {
   return {
     statusCode: 302,
     headers: {
-      location: { value: buildAzureAuthUrl(state, codeChallenge) },
+      location: { value: buildAzureAuthUrl(state, codeChallenge, host) },
       'cache-control': { value: 'no-store' }
     },
     cookies: {
