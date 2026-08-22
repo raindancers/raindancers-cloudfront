@@ -231,6 +231,13 @@ def lambda_handler(event, context):
                 'statusDescription': 'Bad Request',
                 'body': 'Invalid request'
             }
+
+    # Rebuild redirect_uri from the actual (validated) request host so it matches
+    # the reply address used in the authorization request. The config's redirect_uri
+    # is zone-scoped, but the browser initiated login from the specific subdomain.
+    if host_header:
+        redirect_uri = f'https://{host_header}/oauth2/callback'
+        logger.info(f'Using request-host redirect_uri: {redirect_uri}')
     
     # Parse query string
     query_string = request.get('querystring', '')
