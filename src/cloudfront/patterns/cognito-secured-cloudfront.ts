@@ -210,17 +210,12 @@ def get_config():
         functionVersion: oauthCallbackFn.currentVersion,
         eventType: cloudfront.LambdaEdgeEventType.ORIGIN_REQUEST,
       }],
-      cachePolicy: new cloudfront.CachePolicy(this, 'CallbackCachePolicy', {
-        cachePolicyName: `${core.Stack.of(this).stackName}-cognito-callback`,
-        defaultTtl: core.Duration.seconds(0),
-        minTtl: core.Duration.seconds(0),
-        maxTtl: core.Duration.seconds(1),
-        cookieBehavior: cloudfront.CacheCookieBehavior.allowList('oauth_state', 'code_verifier'),
-        headerBehavior: cloudfront.CacheHeaderBehavior.none(),
-        queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
-        enableAcceptEncodingGzip: false,
-        enableAcceptEncodingBrotli: false,
-      }),
+      // Must be non-cacheable: the callback sets session cookies via Set-Cookie,
+      // and CloudFront strips Set-Cookie from cacheable responses whose cache
+      // policy does not key on those cookies. CACHING_DISABLED lets Set-Cookie
+      // reach the viewer. Inbound oauth_state/code_verifier are read from the
+      // request by the callback Lambda and need not be in the cache key.
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
     };
 
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {

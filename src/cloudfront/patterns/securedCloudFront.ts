@@ -366,18 +366,16 @@ def get_config():
           functionVersion: oauthCallbackFunction.currentVersion,
           eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
         }],
-        cachePolicy: props.additionalBehaviors?.['/oauth2/callback']?.cachePolicy ?? new cloudfront.CachePolicy(this, 'CallbackCachePolicy', {
-          cachePolicyName: `${core.Stack.of(this).stackName}-oauth-callback`,
-          comment: 'Cache policy for OAuth callback with state cookie forwarding',
-          defaultTtl: core.Duration.seconds(0),
-          minTtl: core.Duration.seconds(0),
-          maxTtl: core.Duration.seconds(1),
-          cookieBehavior: cloudfront.CacheCookieBehavior.allowList('oauth_state'),
-          headerBehavior: cloudfront.CacheHeaderBehavior.none(),
-          queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
-          enableAcceptEncodingGzip: false,
-          enableAcceptEncodingBrotli: false,
-        }),
+        // The OAuth callback response sets the session cookies (auth_session,
+        // azure_token) via Set-Cookie. CloudFront strips Set-Cookie from any
+        // cacheable response whose cache policy does not key on those cookies —
+        // so a cacheable policy here (even maxTtl=1s) silently drops the auth
+        // cookies before they reach the browser, breaking login entirely.
+        // The callback must therefore be non-cacheable: CACHING_DISABLED lets
+        // Set-Cookie pass straight through to the viewer. The inbound oauth_state
+        // cookie is read from the request by the viewer-request Lambda@Edge and
+        // does not need to be part of the cache key.
+        cachePolicy: props.additionalBehaviors?.['/oauth2/callback']?.cachePolicy ?? cloudfront.CachePolicy.CACHING_DISABLED,
       };
     }
 
