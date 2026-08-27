@@ -16,6 +16,12 @@ export interface ComposerConfig {
   readonly headerInjectionClaims?: Record<string, string>;
   /** Enable refresh redirect for expired-but-valid tokens. @default false */
   readonly enableRefresh?: boolean;
+  /**
+   * Custom-UI mode: first-party path to redirect unauthenticated users to
+   * (e.g. '/login'). When set, the shared auth-check module is used with a
+   * relative redirect instead of an external IdP authorize URL.
+   */
+  readonly loginRedirectPath?: string;
 }
 
 /**
@@ -52,7 +58,11 @@ export class FunctionComposer {
     }
 
     if (extensions.includes(Extension.REQUIRE_AUTH)) {
-      const isCognito = composerConfig?.cognitoDomain !== undefined;
+      // Custom-UI mode uses the shared auth-check module (header injection +
+      // refresh capable) with a first-party /login redirect, even though the
+      // identity provider is Cognito.
+      const isCustomUi = composerConfig?.loginRedirectPath !== undefined && composerConfig.loginRedirectPath !== '';
+      const isCognito = composerConfig?.cognitoDomain !== undefined && !isCustomUi;
       let authModule = this.loadModule(isCognito ? 'cognito-auth-check.js' : 'auth-check.js');
       if (composerConfig) {
         if (composerConfig.cognitoDomain) {
@@ -87,6 +97,9 @@ export class FunctionComposer {
         // Refresh redirect placeholder
         const enableRefresh = composerConfig.enableRefresh ?? false;
         authModule = authModule.replace(/ENABLE_REFRESH_PLACEHOLDER/g, String(enableRefresh));
+
+        // Custom-UI login-redirect placeholder (empty string => IdP-redirect mode)
+        authModule = authModule.replace(/LOGIN_REDIRECT_PATH_PLACEHOLDER/g, composerConfig.loginRedirectPath ?? '');
       }
       parts.push(authModule);
       checks.push('auth');

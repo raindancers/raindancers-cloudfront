@@ -1,16 +1,11 @@
-import * as path from 'path';
 import * as core from 'aws-cdk-lib';
 import {
   aws_cognito as cognito,
-  aws_lambda as lambda,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
-import { AuthLambdaFunctions } from '../auth/authLambdaFunctions';
-import { CognitoAuthSecretManager } from '../auth/cognitoAuthSecretManager';
-import { AuthSecurityTable } from '../authSecurityTable';
-import { AuditLogArchive } from '../logging/auditLogArchive';
-import { SsmCrossRegionWriter } from '../ssmCrossRegionWriter';
 import { AppSpec } from './authInfrastructure';
+import { CognitoCustomerPool } from './cognitoCustomerPool';
+import { CognitoSessionBackend } from './cognitoSessionBackend';
 
 export interface CognitoAuthInfrastructureProps {
   readonly ssmParamPrefix?: string;
@@ -27,6 +22,15 @@ export interface CognitoAuthInfrastructureProps {
   readonly removalPolicy?: core.RemovalPolicy;
 }
 
+/**
+ * Convenience facade that composes a {@link CognitoCustomerPool} (identity
+ * provider) and a {@link CognitoSessionBackend} (session substrate) with the
+ * original bundled defaults. Existing consumers keep the same public API.
+ *
+ * New projects that need finer control (per-brand app clients, SMS MFA, advanced
+ * security, identity-pool ABAC, a separately-managed session backend) should use
+ * {@link CognitoCustomerPool} and {@link CognitoSessionBackend} directly.
+ */
 export class CognitoAuthInfrastructure extends constructs.Construct {
   public readonly configSecretArn: string;
   public readonly kmsKeyArn: string;
@@ -39,124 +43,53 @@ export class CognitoAuthInfrastructure extends constructs.Construct {
   constructor(scope: constructs.Construct, id: string, props: CognitoAuthInfrastructureProps) {
     super(scope, id);
 
-    const preTokenLambda = new lambda.Function(this, 'PreTokenLambda', {
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/pre-token')),
-      timeout: core.Duration.seconds(5),
-    });
+    const region = core.Stack.of(this).region;
+    const account = core.Stack.of(this).account;
 
-    this.userPool = new cognito.UserPool(this, 'UserPool', {
+    const pool = new CognitoCustomerPool(this, 'Pool', {
       userPoolName: `${props.appSpec.name}-user-pool`,
+      cognitoDomainPrefix: props.cognitoDomainPrefix,
       selfSignUpEnabled: false,
-      signInAliases: { email: true },
       mfa: cognito.Mfa.REQUIRED,
       mfaSecondFactor: { otp: true, sms: false },
-      passwordPolicy: {
-        minLength: 12,
-        requireLowercase: true,
-        requireUppercase: true,
-        requireDigits: true,
-        requireSymbols: true,
-      },
-      removalPolicy: props.removalPolicy ?? core.RemovalPolicy.RETAIN,
-    });
-
-    this.userPool.addTrigger(cognito.UserPoolOperation.PRE_TOKEN_GENERATION_CONFIG, preTokenLambda, cognito.LambdaVersion.V2_0);
-
-    if (props.appSpec.groups) {
-      for (const group of props.appSpec.groups) {
-        new cognito.CfnUserPoolGroup(this, `Group${group}`, {
-          userPoolId: this.userPool.userPoolId,
-          groupName: group,
-        });
-      }
-    }
-
-    this.userPoolClient = new cognito.UserPoolClient(this, 'UserPoolClient', {
-      userPool: this.userPool,
-      generateSecret: false,
-      authFlows: { userSrp: true },
-      oAuth: {
-        flows: { authorizationCodeGrant: true },
-        scopes: [
-          cognito.OAuthScope.OPENID,
-          cognito.OAuthScope.EMAIL,
-          cognito.OAuthScope.PROFILE,
-        ],
+      groups: props.appSpec.groups,
+      appClients: [{
+        key: 'default',
         callbackUrls: [`https://${props.zoneName}/oauth2/callback`],
         logoutUrls: [`https://${props.zoneName}`],
-      },
-      supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
+        supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
+      }],
+      removalPolicy: props.removalPolicy,
     });
 
-    this.cognitoDomain = this.userPool.addDomain('CognitoDomain', {
-      cognitoDomain: { domainPrefix: props.cognitoDomainPrefix },
-    });
-
-    const authSecurityTable = new AuthSecurityTable(this, 'AuthSecurityTable', {
-      tableName: `auth-security-${props.zoneName}`,
-      removalPolicy: props.removalPolicy ?? core.RemovalPolicy.RETAIN,
-    });
-
-    const cognitoRegion = core.Stack.of(this).region;
-    const cognitoDomainUrl = `${props.cognitoDomainPrefix}.auth.${cognitoRegion}.amazoncognito.com`;
-
-    const secretManager = new CognitoAuthSecretManager(this, 'SecretManager', {
+    const backend = new CognitoSessionBackend(this, 'Backend', {
+      ssmParamPrefix: props.ssmParamPrefix,
       domainName: props.zoneName,
-      tableName: authSecurityTable.table.tableName,
-      tableRegion: cognitoRegion,
-      userPoolId: this.userPool.userPoolId,
-      clientId: this.userPoolClient.userPoolClientId,
-      cognitoDomain: cognitoDomainUrl,
-      cognitoRegion: cognitoRegion,
+      userPoolId: pool.userPool.userPoolId,
+      clientId: pool.userPoolClient.userPoolClientId,
+      cognitoDomain: pool.cognitoDomainUrl,
+      cognitoRegion: region,
+      tableRegion: region,
+      tableName: `auth-security-${props.zoneName}`,
+      // Preserve the original fixed audit resource names for backward compatibility.
+      auditBucketName: `auth-audit-logs-cognito-${account}-${region}`,
+      auditDatabaseName: 'auth_audit_logs_cognito',
       securityAlertsTopicArn: props.securityAlertsTopicArn,
+      sessionRevocationTopicArn: props.sessionRevocationTopicArn,
       autoRevokeOnReuse: props.autoRevokeOnReuse,
       jwtClaimsWhitelist: props.jwtClaimsWhitelist,
+      hmacSecretRotationSchedule: props.hmacSecretRotationSchedule,
+      auditLogRetentionDays: props.auditLogRetentionDays,
+      auditArchiveRetentionDays: props.auditArchiveRetentionDays,
+      removalPolicy: props.removalPolicy,
     });
 
-    const auditLogRetentionDays = props.auditLogRetentionDays ?? 30;
-    const auditArchiveRetentionDays = props.auditArchiveRetentionDays ?? 365;
-
-    const lambdaFunctions = new AuthLambdaFunctions(this, 'LambdaFunctions', {
-      configSecret: secretManager.configSecret,
-      kmsKey: secretManager.kmsKey,
-      kvs: secretManager.kvs,
-      authTable: authSecurityTable.table,
-      rotationSchedule: props.hmacSecretRotationSchedule,
-      sessionRevocationTopicArn: props.sessionRevocationTopicArn,
-      logRetentionDays: auditLogRetentionDays,
-    });
-
-    new AuditLogArchive(this, 'AuditLogArchive', {
-      logGroupNames: lambdaFunctions.logGroups.map(lg => lg.logGroupName),
-      kmsKey: secretManager.kmsKey,
-      retentionDays: auditLogRetentionDays,
-      archiveRetentionDays: auditArchiveRetentionDays,
-      bucketName: `auth-audit-logs-cognito-${core.Stack.of(this).account}-${core.Stack.of(this).region}`,
-      databaseName: 'auth_audit_logs_cognito',
-      removalPolicy: props.removalPolicy ?? core.RemovalPolicy.RETAIN,
-    });
-
-    const prefix = props.ssmParamPrefix ?? `/auth/${props.zoneName}`;
-
-    new SsmCrossRegionWriter(this, 'SsmWriter', {
-      prefix: prefix,
-      region: 'us-east-1',
-      params: {
-        configSecretArn: secretManager.configSecret.secretArn,
-        kmsKeyArn: secretManager.kmsKey.keyArn,
-        authTableArn: authSecurityTable.table.tableArn,
-        kvsArn: secretManager.kvs.keyValueStoreArn,
-        cognitoDomain: cognitoDomainUrl,
-        clientId: this.userPoolClient.userPoolClientId,
-        userPoolId: this.userPool.userPoolId,
-      },
-    });
-
-    this.configSecretArn = secretManager.configSecret.secretArn;
-    this.kmsKeyArn = secretManager.kmsKey.keyArn;
-    this.authTableArn = authSecurityTable.table.tableArn;
-    this.kvsArn = secretManager.kvs.keyValueStoreArn;
+    this.userPool = pool.userPool;
+    this.userPoolClient = pool.userPoolClient;
+    this.cognitoDomain = pool.userPoolDomain;
+    this.configSecretArn = backend.configSecretArn;
+    this.kmsKeyArn = backend.kmsKeyArn;
+    this.authTableArn = backend.authTableArn;
+    this.kvsArn = backend.kvsArn;
   }
 }
