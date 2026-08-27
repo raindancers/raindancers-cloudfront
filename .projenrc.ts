@@ -57,4 +57,10 @@ project.addPackageIgnore('!/lib/**/host.json');
 // Include pre-bundled Lambda dependencies
 project.addPackageIgnore('!/lib/**/lambda-bundled/**');
 
+// Tests symlink src/cloudfront/lambda-bundled -> lib/cloudfront/lambda-bundled so
+// EdgeFunction bundling can resolve pre-bundled deps from a from-source synth.
+// It is a build/test artifact (a link into gitignored lib/), so ignore it —
+// otherwise the self-mutation gate flags it as an untracked change.
+project.gitignore.exclude('/src/cloudfront/lambda-bundled');
+
 project.synth();

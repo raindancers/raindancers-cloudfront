@@ -10,6 +10,10 @@ const ENABLE_HEADER_INJECTION = ENABLE_HEADER_INJECTION_PLACEHOLDER;
 const HEADER_INJECTION_MAP = HEADER_INJECTION_MAP_PLACEHOLDER;
 const HEADER_INJECTION_KEYS = HEADER_INJECTION_KEYS_PLACEHOLDER;
 const ENABLE_REFRESH = ENABLE_REFRESH_PLACEHOLDER;
+// Custom-UI mode: when non-empty, unauthenticated requests are 302'd to this
+// first-party path (e.g. '/login') instead of an external IdP authorize URL.
+// Empty string preserves the IdP-redirect (Azure/OIDC) behaviour.
+const LOGIN_REDIRECT_PATH = 'LOGIN_REDIRECT_PATH_PLACEHOLDER';
 
 function base64urlDecode(str) {
   var base64 = str.replace(/-/g, '+').replace(/_/g, '/');
@@ -137,6 +141,18 @@ function getOriginalPath(request) {
 }
 
 function redirectToAuth(originalPath, host) {
+  // Custom-UI mode: redirect to a first-party login page. No IdP redirect and
+  // no PKCE state/verifier cookies — the login page performs SRP client-side and
+  // POSTs the resulting tokens to the session-issuance endpoint.
+  if (LOGIN_REDIRECT_PATH) {
+    return {
+      statusCode: 302,
+      headers: {
+        location: { value: LOGIN_REDIRECT_PATH + '?returnTo=' + encodeURIComponent(originalPath) },
+        'cache-control': { value: 'no-store' }
+      }
+    };
+  }
   var state = generateState(originalPath, host);
   var codeVerifier = generateCodeVerifier();
   var codeChallenge = generateCodeChallenge(codeVerifier);
