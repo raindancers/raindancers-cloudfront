@@ -201,3 +201,54 @@ describe('CognitoCustomUiAuth attach mode', () => {
     })).toThrow(/defaultBehavior and certificate are required/);
   });
 });
+
+describe('CognitoCustomUiAuth default-behaviour functions (no L1 override)', () => {
+  function stackWithGeo() {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'GeoStack', { env: { account: '123456789012', region: 'us-east-1' } });
+    const cert = acm.Certificate.fromCertificateArn(stack, 'Cert', 'arn:aws:acm:us-east-1:123456789012:certificate/abc');
+    const geo = new cloudfront.Function(stack, 'Geo', {
+      code: cloudfront.FunctionCode.fromInline('function handler(event){return event.request}'),
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+    });
+    return { app, stack, cert, geo };
+  }
+
+  test('a consumer viewer-request function on the PUBLIC default behaviour is attached natively', () => {
+    const { stack, cert, geo } = stackWithGeo();
+    new CognitoCustomUiAuth(stack, 'Auth', {
+      domainNames: ['shop.example.com'],
+      certificate: cert,
+      authSsmParamPrefix: '/auth/shop.example.com',
+      authRegion: 'us-east-1',
+      identityLinkingHookUrl: 'https://shop.example.com/hooks/identity',
+      defaultBehavior: {
+        origin: new origins.HttpOrigin('origin.example.com'),
+        functionAssociations: [{ function: geo, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST }],
+      },
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        DefaultCacheBehavior: Match.objectLike({
+          FunctionAssociations: Match.arrayWith([Match.objectLike({ EventType: 'viewer-request' })]),
+        }),
+      }),
+    });
+  });
+
+  test('throws if auth and a consumer function both claim viewer-request on the default behaviour', () => {
+    const { stack, cert, geo } = stackWithGeo();
+    expect(() => new CognitoCustomUiAuth(stack, 'Auth', {
+      domainNames: ['shop.example.com'],
+      certificate: cert,
+      authSsmParamPrefix: '/auth/shop.example.com',
+      authRegion: 'us-east-1',
+      identityLinkingHookUrl: 'https://shop.example.com/hooks/identity',
+      defaultExtensions: [Extension.REQUIRE_AUTH],
+      defaultBehavior: {
+        origin: new origins.HttpOrigin('origin.example.com'),
+        functionAssociations: [{ function: geo, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST }],
+      },
+    })).toThrow(/one function per event type per behaviour/);
+  });
+});
