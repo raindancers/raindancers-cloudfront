@@ -13,7 +13,7 @@ import { Extension, ExtensionConfig, AddBehaviorOptions, RoleMatchMode } from '.
 import { FunctionComposer } from '../cloudfront-functions/function-composer';
 
 export interface CognitoCloudFrontProps<TRole extends string = string> {
-  readonly defaultBehavior: Omit<cloudfront.BehaviorOptions, 'functionAssociations'>;
+  readonly defaultBehavior: cloudfront.BehaviorOptions;
   readonly domainNames: string[];
   readonly certificate: any;
   readonly authSsmParamPrefix: string;
@@ -225,7 +225,7 @@ def get_config():
         const built = this.buildFunctionAssociations(props.defaultExtensions, props.defaultExtensionConfig);
         return {
           ...props.defaultBehavior,
-          functionAssociations: built?.functionAssociations,
+          functionAssociations: this.mergeFunctionAssociations(built?.functionAssociations, props.defaultBehavior.functionAssociations),
           originRequestPolicy: built?.originRequestPolicy,
         };
       })(),
@@ -262,9 +262,37 @@ def get_config():
     const built = this.buildFunctionAssociations(options.extensions, options.extensionConfig);
     this.distribution.addBehavior(pathPattern, origin, {
       ...options.behaviorOptions,
-      functionAssociations: built?.functionAssociations ?? options.behaviorOptions?.functionAssociations,
+      functionAssociations: this.mergeFunctionAssociations(built?.functionAssociations, options.behaviorOptions?.functionAssociations),
       originRequestPolicy: built?.originRequestPolicy ?? options.behaviorOptions?.originRequestPolicy,
     });
+  }
+
+  /**
+   * Merge two sets of function associations, enforcing CloudFront's rule of one
+   * function per event type per behaviour. The construct never inspects or
+   * composes a consumer's function — combining two functions on the same event
+   * type is the consumer's responsibility.
+   */
+  private mergeFunctionAssociations(
+    a?: cloudfront.FunctionAssociation[],
+    b?: cloudfront.FunctionAssociation[],
+  ): cloudfront.FunctionAssociation[] | undefined {
+    const all = [...(a ?? []), ...(b ?? [])];
+    if (all.length === 0) {
+      return undefined;
+    }
+    const seen = new Set<cloudfront.FunctionEventType>();
+    for (const fa of all) {
+      if (seen.has(fa.eventType)) {
+        throw new Error(
+          `CloudFront allows only one function per event type per behaviour, but two '${fa.eventType}' ` +
+          'functions were supplied (e.g. REQUIRE_AUTH plus your own function). Keep auth and your other ' +
+          'function on separate path behaviours, or combine them into a single function yourself.',
+        );
+      }
+      seen.add(fa.eventType);
+    }
+    return all;
   }
 
   private buildFunctionAssociations(
