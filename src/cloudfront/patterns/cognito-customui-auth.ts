@@ -32,9 +32,12 @@ export interface CognitoCustomUiAuthProps<TRole extends string = string> {
   /**
    * CREATE MODE: default cache behaviour for a distribution this construct will
    * create. Provide with {@link certificate}. Mutually exclusive with
-   * {@link distribution}.
+   * {@link distribution}. You MAY set `functionAssociations` here (e.g. a
+   * geo-routing viewer-request function) — it is merged with the auth-check
+   * function; CloudFront's one-function-per-event-type rule is enforced with a
+   * clear error rather than an L1 override.
    */
-  readonly defaultBehavior?: Omit<cloudfront.BehaviorOptions, 'functionAssociations'>;
+  readonly defaultBehavior?: cloudfront.BehaviorOptions;
   /** Domain names for the auth config (allowed_domains); first is canonical. Required in both modes. */
   readonly domainNames: string[];
   /** CREATE MODE: ACM certificate (us-east-1) covering {@link domainNames}. */
@@ -299,7 +302,10 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
         minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
         defaultBehavior: {
           ...props.defaultBehavior!,
-          functionAssociations: this.buildFunctionAssociations(props.defaultExtensions, props.defaultExtensionConfig),
+          functionAssociations: this.mergeFunctionAssociations(
+            this.buildFunctionAssociations(props.defaultExtensions, props.defaultExtensionConfig),
+            props.defaultBehavior!.functionAssociations,
+          ),
         },
         additionalBehaviors: additionalBehaviors,
         domainNames: props.domainNames,
@@ -326,9 +332,39 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
   ): void {
     this.distribution.addBehavior(pathPattern, origin, {
       ...options.behaviorOptions,
-      functionAssociations: this.buildFunctionAssociations(options.extensions, options.extensionConfig)
-        ?? options.behaviorOptions?.functionAssociations,
+      functionAssociations: this.mergeFunctionAssociations(
+        this.buildFunctionAssociations(options.extensions, options.extensionConfig),
+        options.behaviorOptions?.functionAssociations,
+      ),
     });
+  }
+
+  /**
+   * Merge two sets of function associations, enforcing CloudFront's rule of one
+   * function per event type per behaviour. The library never composes or inspects
+   * a consumer's function — it only attaches it; combining two functions on the
+   * same event type is the consumer's responsibility (a single function).
+   */
+  private mergeFunctionAssociations(
+    auth?: cloudfront.FunctionAssociation[],
+    consumer?: cloudfront.FunctionAssociation[],
+  ): cloudfront.FunctionAssociation[] | undefined {
+    const all = [...(auth ?? []), ...(consumer ?? [])];
+    if (all.length === 0) {
+      return undefined;
+    }
+    const seen = new Set<cloudfront.FunctionEventType>();
+    for (const fa of all) {
+      if (seen.has(fa.eventType)) {
+        throw new Error(
+          `CloudFront allows only one function per event type per behaviour, but two '${fa.eventType}' ` +
+          'functions were supplied (e.g. REQUIRE_AUTH plus your own function). Keep auth and your other ' +
+          'function on separate path behaviours, or combine them into a single function yourself.',
+        );
+      }
+      seen.add(fa.eventType);
+    }
+    return all;
   }
 
   /**
