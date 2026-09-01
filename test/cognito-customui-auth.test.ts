@@ -31,6 +31,22 @@ describe('CognitoCustomUiAuth synthesis', () => {
     synth().resourceCountIs('AWS::CloudFront::Distribution', 1);
   });
 
+  test('accepts a configSecretName override without breaking synthesis', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'OverrideStack', { env: { account: '123456789012', region: 'us-east-1' } });
+    const cert = acm.Certificate.fromCertificateArn(stack, 'Cert', 'arn:aws:acm:us-east-1:123456789012:certificate/abc');
+    new CognitoCustomUiAuth(stack, 'Auth', {
+      domainNames: ['shop.example.com'],
+      configSecretName: 'cognito-auth-config-shop.example.com',
+      certificate: cert,
+      authSsmParamPrefix: '/cognito-auth/shop.example.com',
+      authRegion: 'us-east-1',
+      identityLinkingHookUrl: 'https://shop.example.com/hooks/identity',
+      defaultBehavior: { origin: new origins.HttpOrigin('origin.example.com') },
+    });
+    Template.fromStack(stack).resourceCountIs('AWS::CloudFront::Distribution', 1);
+  });
+
   test('mounts session-issuance, refresh and logout behaviours', () => {
     const template = synth();
     template.hasResourceProperties('AWS::CloudFront::Distribution', {

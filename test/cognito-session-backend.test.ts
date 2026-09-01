@@ -35,6 +35,21 @@ describe('CognitoSessionBackend', () => {
     });
   });
 
+  test('overrides the config secret name when configSecretName is provided', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'OverrideStack', { env: { account: '123456789012', region: 'eu-west-2' } });
+    new CognitoSessionBackend(stack, 'Backend', {
+      domainName: 'shop.example.com',
+      configSecretName: 'cognito-auth-config-shop.example.com',
+      userPoolId: 'eu-west-2_abc123',
+      clientId: 'client-abc',
+      cognitoDomain: 'shop-brand.auth.eu-west-2.amazoncognito.com',
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::SecretsManager::Secret', {
+      Name: 'cognito-auth-config-shop.example.com',
+    });
+  });
+
   test('creates the auth-security DynamoDB table', () => {
     synth().resourceCountIs('AWS::DynamoDB::Table', 1);
   });

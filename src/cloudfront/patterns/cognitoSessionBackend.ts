@@ -17,6 +17,13 @@ export interface CognitoSessionBackendProps {
   readonly ssmParamPrefix?: string;
   /** Canonical domain — used for the config-secret name and default resource names. */
   readonly domainName: string;
+  /**
+   * Config-secret name (the secret the edge Lambdas fetch by name). Override to
+   * decouple the name from {@link domainName}, e.g. to avoid a physical-name
+   * collision when replacing an existing auth construct in the same stack.
+   * @default `cloudfront-auth-config-${domainName}`
+   */
+  readonly configSecretName?: string;
   /** Cognito user pool id. */
   readonly userPoolId: string;
   /** Cognito app client id embedded in the config secret. */
@@ -78,6 +85,7 @@ export class CognitoSessionBackend extends constructs.Construct {
 
     const secretManager = new CognitoAuthSecretManager(this, 'SecretManager', {
       domainName: props.domainName,
+      configSecretName: props.configSecretName,
       tableName: authSecurityTable.table.tableName,
       tableRegion: tableRegion,
       userPoolId: props.userPoolId,

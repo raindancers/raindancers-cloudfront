@@ -10,6 +10,8 @@ import * as constructs from 'constructs';
 
 export interface CognitoAuthSecretManagerProps {
   readonly domainName: string;
+  /** Config-secret name. @default `cloudfront-auth-config-${domainName}` */
+  readonly configSecretName?: string;
   readonly tableName: string;
   readonly tableRegion: string;
   readonly userPoolId: string;
@@ -52,7 +54,7 @@ export class CognitoAuthSecretManager extends constructs.Construct {
     ];
 
     this.configSecret = new secretsmanager.Secret(this, 'ConfigSecret', {
-      secretName: `cloudfront-auth-config-${props.domainName}`,
+      secretName: props.configSecretName ?? `cloudfront-auth-config-${props.domainName}`,
       encryptionKey: this.kmsKey,
       generateSecretString: {
         secretStringTemplate: JSON.stringify({
