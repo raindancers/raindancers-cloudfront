@@ -40,6 +40,13 @@ export interface CognitoCustomUiAuthProps<TRole extends string = string> {
   readonly defaultBehavior?: cloudfront.BehaviorOptions;
   /** Domain names for the auth config (allowed_domains); first is canonical. Required in both modes. */
   readonly domainNames: string[];
+  /**
+   * Name of the shared session config secret the edge Lambdas fetch by name.
+   * MUST match the name the {@link CognitoSessionBackend} created it under.
+   * Override to decouple from the canonical domain.
+   * @default `cloudfront-auth-config-${domainNames[0]}`
+   */
+  readonly configSecretName?: string;
   /** CREATE MODE: ACM certificate (us-east-1) covering {@link domainNames}. */
   readonly certificate?: acm.ICertificate;
   /** CREATE MODE: WAF web ACL ARN to associate with the created distribution. */
@@ -155,7 +162,7 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
     this.composedFunctions = new Map();
 
     const canonicalDomain = props.domainNames[0];
-    const baseSecretName = `cloudfront-auth-config-${canonicalDomain}`;
+    const baseSecretName = props.configSecretName ?? `cloudfront-auth-config-${canonicalDomain}`;
     const sessionIssuancePath = props.sessionIssuancePath ?? '/auth/session';
 
     // Extra config secret for values that are CDK tokens at synth time (and so
