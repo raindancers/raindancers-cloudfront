@@ -1,4 +1,7 @@
-# This Lambda uses only boto3 and urllib3, both of which are provided by the AWS
-# Lambda Python managed runtime, so no third-party dependencies are vendored.
-# The previous botocore[crt] pin was redundant (botocore is runtime-provided) and
-# additionally pulled in the native awscrt library, which this handler never uses.
+# botocore[crt] is REQUIRED here, not redundant. This handler writes to a
+# CloudFront KeyValueStore via the boto3 'cloudfront-keyvaluestore' client
+# (describe_key_value_store / put_key). That service's endpoint ruleset uses
+# SigV4a signing, which needs the native awscrt library. awscrt is NOT provided
+# by the Lambda Python managed runtime, so it must be vendored via the
+# botocore[crt] extra. Pinned to avoid CDK asset-hash churn.
+botocore[crt]==1.43.41
