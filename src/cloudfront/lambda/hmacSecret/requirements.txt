@@ -1,1 +1,4 @@
-botocore[crt]==1.43.41
+# This Lambda uses only boto3 and urllib3, both of which are provided by the AWS
+# Lambda Python managed runtime, so no third-party dependencies are vendored.
+# The previous botocore[crt] pin was redundant (botocore is runtime-provided) and
+# additionally pulled in the native awscrt library, which this handler never uses.
