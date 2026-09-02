@@ -58,8 +58,15 @@ export class AuthLambdaFunctions extends constructs.Construct {
               const bundledDepsDir = path.join(__dirname, '../lambda-bundled/hmacSecret');
               const sourceDir = path.join(__dirname, '../lambda/hmacSecret');
 
-              // Copy pre-bundled dependencies
-              fs.cpSync(bundledDepsDir, outputDir, { recursive: true });
+              // Copy pre-bundled dependencies if present. This Lambda vendors no
+              // third-party dependencies (boto3, botocore and urllib3 are all
+              // provided by the AWS Lambda Python runtime), so the pre-bundled
+              // directory can be empty and is therefore omitted from the published
+              // package. Its absence is expected, not an error: only copy when it
+              // exists, otherwise fall through to copying just the handler source.
+              if (fs.existsSync(bundledDepsDir)) {
+                fs.cpSync(bundledDepsDir, outputDir, { recursive: true });
+              }
 
               // Copy Lambda source files (overwrite any conflicts with source)
               const sourceFiles = fs.readdirSync(sourceDir);
