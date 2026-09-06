@@ -78,6 +78,68 @@ describe('CognitoCustomUiAuth synthesis', () => {
     });
   });
 
+  test('auth endpoint behaviours allow POST (B3: they are POST-driven)', () => {
+    const template = synth();
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        CacheBehaviors: Match.arrayWith([
+          Match.objectLike({ PathPattern: '/auth/session', AllowedMethods: Match.arrayWith(['POST']) }),
+          Match.objectLike({ PathPattern: '/oauth2/logout', AllowedMethods: Match.arrayWith(['POST']) }),
+        ]),
+      }),
+    });
+  });
+
+  test('authEndpointAllowedMethods override is honoured (still includes POST)', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'MethodsOverride', { env: { account: '123456789012', region: 'us-east-1' } });
+    const cert = acm.Certificate.fromCertificateArn(stack, 'Cert', 'arn:aws:acm:us-east-1:123456789012:certificate/abc');
+    new CognitoCustomUiAuth(stack, 'Auth', {
+      domainNames: ['shop.example.com'],
+      certificate: cert,
+      authSsmParamPrefix: '/auth/shop.example.com',
+      authRegion: 'us-east-1',
+      identityLinkingHookUrl: 'https://shop.example.com/hooks/identity',
+      authEndpointAllowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+      defaultBehavior: { origin: new origins.HttpOrigin('origin.example.com') },
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        CacheBehaviors: Match.arrayWith([
+          Match.objectLike({ PathPattern: '/auth/session', AllowedMethods: ['GET', 'HEAD', 'OPTIONS'] }),
+        ]),
+      }),
+    });
+  });
+
+  test('minimumProtocolVersion defaults to the current-generation policy (H2: no silent downgrade)', () => {
+    synth().hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        ViewerCertificate: Match.objectLike({ MinimumProtocolVersion: 'TLSv1.2_2025' }),
+      }),
+    });
+  });
+
+  test('minimumProtocolVersion prop overrides the default', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'TlsOverride', { env: { account: '123456789012', region: 'us-east-1' } });
+    const cert = acm.Certificate.fromCertificateArn(stack, 'Cert', 'arn:aws:acm:us-east-1:123456789012:certificate/abc');
+    new CognitoCustomUiAuth(stack, 'Auth', {
+      domainNames: ['shop.example.com'],
+      certificate: cert,
+      authSsmParamPrefix: '/auth/shop.example.com',
+      authRegion: 'us-east-1',
+      identityLinkingHookUrl: 'https://shop.example.com/hooks/identity',
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+      defaultBehavior: { origin: new origins.HttpOrigin('origin.example.com') },
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        ViewerCertificate: Match.objectLike({ MinimumProtocolVersion: 'TLSv1.2_2021' }),
+      }),
+    });
+  });
+
   test('attaches a WAF web ACL when webAclId is provided (create mode)', () => {
     const app = new core.App();
     const stack = new core.Stack(app, 'WafStack', { env: { account: '123456789012', region: 'us-east-1' } });

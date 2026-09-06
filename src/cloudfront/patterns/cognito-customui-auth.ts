@@ -109,6 +109,22 @@ export interface CognitoCustomUiAuthProps<TRole extends string = string> {
   readonly errorResponsePagePath?: string;
   /** Default root object. @default 'index.html' */
   readonly defaultRootObject?: string;
+  /**
+   * CREATE MODE: minimum TLS security policy for the created distribution's
+   * viewer connections. Defaults to the current-generation policy; override only
+   * to relax it (not recommended). Ignored in ATTACH MODE — the passed-in
+   * distribution already fixes its own policy.
+   * @default cloudfront.SecurityPolicyProtocol.TLS_V1_2_2025
+   */
+  readonly minimumProtocolVersion?: cloudfront.SecurityPolicyProtocol;
+  /**
+   * Allowed viewer HTTP methods for the auth endpoint behaviours (session
+   * issuance, refresh, logout). These endpoints are POST-driven, so the default
+   * permits all methods; CloudFront's GET/HEAD default would otherwise reject the
+   * POST they require. Override to narrow it (must still include POST).
+   * @default cloudfront.AllowedMethods.ALLOW_ALL
+   */
+  readonly authEndpointAllowedMethods?: cloudfront.AllowedMethods;
 }
 
 /**
@@ -273,8 +289,13 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
 
     const endpointOrigin: cloudfront.IOrigin = attachMode ? props.authEndpointOrigin! : props.defaultBehavior!.origin;
 
+    // Auth endpoints are POST-driven; CloudFront otherwise defaults to GET/HEAD
+    // and rejects the POST these endpoints require. Allow all methods by default.
+    const authEndpointAllowedMethods = props.authEndpointAllowedMethods ?? cloudfront.AllowedMethods.ALLOW_ALL;
+
     const endpointOpts = (fn: cloudfront.experimental.EdgeFunction, includeBody: boolean): cloudfront.AddBehaviorOptions => ({
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: authEndpointAllowedMethods,
       // Set-Cookie must reach the viewer — caching disabled.
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       edgeLambdas: [{
@@ -306,7 +327,7 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
 
       this.distribution = new cloudfront.Distribution(this, 'Distribution', {
         httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
-        minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+        minimumProtocolVersion: props.minimumProtocolVersion ?? cloudfront.SecurityPolicyProtocol.TLS_V1_2_2025,
         defaultBehavior: {
           ...props.defaultBehavior!,
           functionAssociations: this.mergeFunctionAssociations(
