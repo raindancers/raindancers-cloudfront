@@ -95,6 +95,7 @@ export class CognitoSessionBackend extends constructs.Construct {
       securityAlertsTopicArn: props.securityAlertsTopicArn,
       autoRevokeOnReuse: props.autoRevokeOnReuse,
       jwtClaimsWhitelist: props.jwtClaimsWhitelist,
+      removalPolicy: props.removalPolicy,
     });
 
     const auditLogRetentionDays = props.auditLogRetentionDays ?? 30;

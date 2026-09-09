@@ -21,6 +21,11 @@ export interface CognitoAuthSecretManagerProps {
   readonly securityAlertsTopicArn?: string;
   readonly autoRevokeOnReuse?: boolean;
   readonly jwtClaimsWhitelist?: string[];
+  /**
+   * Removal policy for the auth-secret KMS key.
+   * @default RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE
+   */
+  readonly removalPolicy?: RemovalPolicy;
 }
 
 export class CognitoAuthSecretManager extends constructs.Construct {
@@ -34,7 +39,10 @@ export class CognitoAuthSecretManager extends constructs.Construct {
     this.kmsKey = new kms.Key(this, 'KmsKey', {
       description: 'KMS key for CloudFront Cognito auth secret encryption',
       enableKeyRotation: true,
-      removalPolicy: RemovalPolicy.RETAIN,
+      // RETAIN_ON_UPDATE_OR_DELETE, not RETAIN: keep the key on a real
+      // update/delete, but let a rolled-back CREATE self-delete instead of
+      // orphaning a key that blocks the next deploy's import.
+      removalPolicy: props.removalPolicy ?? RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE,
     });
 
     this.kmsKey.addToResourcePolicy(new iam.PolicyStatement({
