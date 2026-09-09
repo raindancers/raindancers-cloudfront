@@ -278,12 +278,17 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       logoutFn = this.makeEdgeFunction('SessionLogout', 'cognito-customui-logout', configPy, logoutRole, false);
     }
 
-    // Retain old Lambda@Edge versions — edge replicas take hours to drain.
+    // Retain old Lambda@Edge versions on a real update/delete — edge replicas
+    // take hours to drain — but let CloudFormation delete a version whose
+    // CREATE was rolled back (RetainExceptOnCreate). A plain RETAIN orphans the
+    // version (and, through it, the function and its IAM role) on a failed
+    // create, blocking the next deploy's import; RETAIN_ON_UPDATE_OR_DELETE
+    // keeps the drain-safe retain behaviour without the orphan.
     for (const fn of [issuanceFn, refreshFn, logoutFn]) {
       if (!fn) continue;
       const version = fn.currentVersion.node.defaultChild as core.CfnResource;
       if (version) {
-        version.applyRemovalPolicy(core.RemovalPolicy.RETAIN);
+        version.applyRemovalPolicy(core.RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE);
       }
     }
 
