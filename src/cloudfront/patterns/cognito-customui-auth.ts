@@ -300,7 +300,7 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       edgeLambdas: [{
         functionVersion: fn.currentVersion,
-        eventType: cloudfront.LambdaEdgeEventType.ORIGIN_REQUEST,
+        eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
         includeBody: includeBody,
       }],
     });
