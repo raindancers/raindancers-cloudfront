@@ -91,6 +91,9 @@
           "exec": "pip install -r src/cloudfront/lambda/cognito-auth/requirements.txt --target lib/cloudfront/lambda-bundled/cognito-auth --upgrade --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.11 --implementation cp --quiet"
         },
         {
+          "exec": "pip install -r src/cloudfront/lambda/cognito-customui-session/requirements.txt --target lib/cloudfront/lambda-bundled/cognito-customui-session --upgrade --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.11 --implementation cp --quiet"
+        },
+        {
           "exec": "pip install -r src/cloudfront/lambda/hmacSecret/requirements.txt --target lib/cloudfront/lambda-bundled/hmacSecret --upgrade --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.12 --implementation cp --quiet"
         }
       ]

@@ -39,6 +39,11 @@ project.compileTask.exec(
 const lambdaBundles = [
   { name: 'edge-auth', path: 'src/cloudfront/lambda/edge-auth/requirements.txt', pythonVersion: '3.11' },
   { name: 'cognito-auth', path: 'src/cloudfront/lambda/cognito-auth/requirements.txt', pythonVersion: '3.11' },
+  // Custom-UI session issuance verifies the Cognito id_token with the pure-Python
+  // `rsa` library (not PyJWT/cryptography), so it gets its OWN small bundle rather
+  // than reusing the fat cognito-auth one — this keeps it under the 1 MB
+  // viewer-request Lambda@Edge code limit.
+  { name: 'cognito-customui-session', path: 'src/cloudfront/lambda/cognito-customui-session/requirements.txt', pythonVersion: '3.11' },
   { name: 'hmacSecret', path: 'src/cloudfront/lambda/hmacSecret/requirements.txt', pythonVersion: '3.12' },
 ];
 
