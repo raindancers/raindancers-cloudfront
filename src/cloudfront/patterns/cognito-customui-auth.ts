@@ -265,24 +265,27 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       ],
     });
 
-    // Session-issuance Lambda (needs PyJWT for RS256 — reuse the cognito-auth bundle).
+    // Session-issuance Lambda: verifies the Cognito id_token with the pure-Python
+    // `rsa` library, bundled from its own cognito-customui-session deps dir (NOT the
+    // fat PyJWT/cryptography cognito-auth bundle) so it fits the 1 MB viewer-request
+    // Lambda@Edge code limit.
     const issuanceRole = edgeRole('IssuanceRole');
     grantCommon(issuanceRole, { kms: true, ddb: true, kvs: false, cognito: false, hookSecret: true });
-    const issuanceFn = this.makeEdgeFunction('SessionIssuance', 'cognito-customui-session', configPy, issuanceRole, true);
+    const issuanceFn = this.makeEdgeFunction('SessionIssuance', 'cognito-customui-session', configPy, issuanceRole, 'cognito-customui-session');
 
     // Refresh + logout Lambdas (boto3 only — no bundled deps).
     let refreshFn: cloudfront.experimental.EdgeFunction | undefined;
     if (this.enableRefresh) {
       const refreshRole = edgeRole('RefreshRole');
       grantCommon(refreshRole, { kms: true, ddb: true, kvs: false, cognito: true, hookSecret: false });
-      refreshFn = this.makeEdgeFunction('SessionRefresh', 'cognito-customui-refresh', configPy, refreshRole, false);
+      refreshFn = this.makeEdgeFunction('SessionRefresh', 'cognito-customui-refresh', configPy, refreshRole);
     }
 
     let logoutFn: cloudfront.experimental.EdgeFunction | undefined;
     if (props.enableLogoutEndpoint ?? true) {
       const logoutRole = edgeRole('LogoutRole');
       grantCommon(logoutRole, { kms: true, ddb: true, kvs: true, cognito: true, hookSecret: false });
-      logoutFn = this.makeEdgeFunction('SessionLogout', 'cognito-customui-logout', configPy, logoutRole, false);
+      logoutFn = this.makeEdgeFunction('SessionLogout', 'cognito-customui-logout', configPy, logoutRole);
     }
 
     // Retain old Lambda@Edge versions on a real update/delete — edge replicas
@@ -537,10 +540,10 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
     sourceDirName: string,
     configPy: string,
     role: iam.IRole,
-    reuseCognitoBundle: boolean,
+    bundledDepsName?: string,
   ): cloudfront.experimental.EdgeFunction {
     const sourceDir = path.join(__dirname, '../lambda', sourceDirName);
-    const bundledDepsDir = path.join(__dirname, '../lambda-bundled/cognito-auth');
+    const bundledDepsDir = bundledDepsName ? path.join(__dirname, '../lambda-bundled', bundledDepsName) : undefined;
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'customui-auth-'));
     const configPyPath = path.join(tempDir, 'config_generated.py');
     fs.writeFileSync(configPyPath, configPy);
@@ -555,7 +558,7 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
         bundling: {
           local: {
             tryBundle(outputDir: string): boolean {
-              if (reuseCognitoBundle && fs.existsSync(bundledDepsDir)) {
+              if (bundledDepsDir && fs.existsSync(bundledDepsDir)) {
                 fs.cpSync(bundledDepsDir, outputDir, { recursive: true });
               }
               for (const file of fs.readdirSync(sourceDir)) {
