@@ -29,8 +29,7 @@ import uuid
 from datetime import datetime
 
 import boto3
-import jwt
-from jwt import PyJWK
+import rsa
 
 from config_generated import get_config
 
@@ -83,22 +82,65 @@ def base64url_encode(data):
     return base64.urlsafe_b64encode(data).decode('utf-8').rstrip('=')
 
 
+def _b64url_decode(data):
+    """Decode a base64url string (JWT segment) with restored padding."""
+    return base64.urlsafe_b64decode(data + '=' * (-len(data) % 4))
+
+
+def _int_from_b64url(data):
+    return int.from_bytes(_b64url_decode(data), 'big')
+
+
 def validate_id_token(id_token, client_id, user_pool_id, cognito_region):
-    """Validate a Cognito id_token: RS256, correct audience and issuer."""
+    """Validate a Cognito id_token: RS256 signature, audience, issuer, expiry.
+
+    Uses the pure-Python `rsa` library (no PyJWT/cryptography) so the edge
+    bundle stays under the 1 MB Lambda@Edge viewer-request code limit. Returns
+    the decoded claims dict; raises on any validation failure.
+    """
     global JWKS_CACHE
     if JWKS_CACHE is None:
         jwks_url = f'https://cognito-idp.{cognito_region}.amazonaws.com/{user_pool_id}/.well-known/jwks.json'
-        with urllib.request.urlopen(jwks_url, timeout=5) as response:
+        with urllib.request.urlopen(jwks_url, timeout=2) as response:
             JWKS_CACHE = json.loads(response.read().decode('utf-8'))
 
-    unverified_header = jwt.get_unverified_header(id_token)
-    rsa_key = next((k for k in JWKS_CACHE['keys'] if k['kid'] == unverified_header['kid']), None)
+    try:
+        header_b64, payload_b64, sig_b64 = id_token.split('.')
+    except ValueError:
+        raise ValueError('Malformed JWT: expected 3 segments')
+
+    header = json.loads(_b64url_decode(header_b64))
+    if header.get('alg') != 'RS256':
+        raise ValueError(f"Unexpected JWT alg: {header.get('alg')!r}")
+
+    rsa_key = next((k for k in JWKS_CACHE['keys'] if k['kid'] == header.get('kid')), None)
     if not rsa_key:
         raise ValueError('No matching JWKS key for token kid')
+    if rsa_key.get('kty') != 'RSA':
+        raise ValueError('JWKS key is not an RSA key')
 
-    jwk = PyJWK.from_dict(rsa_key)
-    issuer = f'https://cognito-idp.{cognito_region}.amazonaws.com/{user_pool_id}'
-    return jwt.decode(id_token, jwk.key, algorithms=['RS256'], audience=client_id, issuer=issuer)
+    # Verify the RS256 signature over the signing input (header.payload).
+    # rsa.verify recomputes the SHA-256 digest and checks PKCS#1 v1.5 padding,
+    # raising rsa.pkcs1.VerificationError on any mismatch.
+    pub_key = rsa.PublicKey(_int_from_b64url(rsa_key['n']), _int_from_b64url(rsa_key['e']))
+    signing_input = f'{header_b64}.{payload_b64}'.encode('ascii')
+    if rsa.verify(signing_input, _b64url_decode(sig_b64), pub_key) != 'SHA-256':
+        raise ValueError('Unexpected signature hash algorithm')
+
+    # Signature is valid; now enforce the standard claims (what PyJWT did).
+    claims = json.loads(_b64url_decode(payload_b64))
+    now = int(time.time())
+    if claims.get('exp') is not None and now >= int(claims['exp']):
+        raise ValueError('Token expired')
+    if claims.get('nbf') is not None and now < int(claims['nbf']):
+        raise ValueError('Token not yet valid')
+    expected_issuer = f'https://cognito-idp.{cognito_region}.amazonaws.com/{user_pool_id}'
+    if claims.get('iss') != expected_issuer:
+        raise ValueError('Invalid issuer')
+    aud = claims.get('aud')
+    if aud != client_id and not (isinstance(aud, list) and client_id in aud):
+        raise ValueError('Invalid audience')
+    return claims
 
 
 def call_identity_hook(hook_url, identity):
@@ -110,7 +152,7 @@ def call_identity_hook(hook_url, identity):
         headers['Authorization'] = f'Bearer {secret}'
     req = urllib.request.Request(hook_url, data=data, headers=headers, method='POST')
     try:
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=3) as response:
             return response.getcode(), json.loads(response.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         body = {}
