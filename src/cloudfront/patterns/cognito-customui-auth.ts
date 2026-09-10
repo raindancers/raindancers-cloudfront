@@ -315,13 +315,16 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       edgeLambdas: [{
         functionVersion: fn.currentVersion,
-        // Origin-request, not viewer-request: the session-issuance function bundles
-        // PyJWT and exceeds the 1 MB viewer-request code limit, so it must run at
-        // origin-request (50 MB limit). Origin-request Lambda@Edge is not permitted
-        // on a VPC-origin behaviour, which is why these endpoints run on
-        // authEndpointOrigin (a non-VPC origin) rather than the default behaviour's
-        // origin — see the authEndpointOrigin prop doc.
-        eventType: cloudfront.LambdaEdgeEventType.ORIGIN_REQUEST,
+        // Viewer-request: these functions generate the response entirely at the
+        // edge and never contact the origin. Viewer-request fires reliably on a
+        // cache miss regardless of origin type (unlike origin-request, which is
+        // illegal on a VPC-origin behaviour and — as observed on attach-mode
+        // distributions — could silently fail to intercept, letting the request
+        // fall through to the placeholder origin). It caps code at 1 MB, which
+        // the session-issuance function now fits after dropping PyJWT/cryptography
+        // for the pure-Python `rsa` library. The behaviour still needs a target
+        // origin (endpointOrigin), but it is a never-contacted placeholder.
+        eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
         includeBody: includeBody,
       }],
     });
