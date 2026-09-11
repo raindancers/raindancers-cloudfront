@@ -190,8 +190,16 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
 
     // Extra config secret for values that are CDK tokens at synth time (and so
     // cannot be baked into config_generated.py) — Lambda@Edge forbids env vars.
+    // Bake the LITERAL name below, NOT `extraConfigSecret.secretName`: that
+    // property is a deploy-time token (CloudFormation derives it by parsing the
+    // secret ARN), so baking it into config_generated.py at synth renders it as
+    // `${Token[Fn::Join.NNNN]}`. The edge's `get_secret_value(SecretId=...)`
+    // then fails with `ValidationException: Invalid name`, the extra config
+    // (post_auth_hook_url, kvs_arn, post_auth_hook_secret_arn) never loads, and
+    // the identity-linking hook is silently never called.
+    const extraConfigSecretName = `cloudfront-customui-config-${canonicalDomain}`;
     const extraConfigSecret = new secretsmanager.Secret(this, 'CustomUiConfigSecret', {
-      secretName: `cloudfront-customui-config-${canonicalDomain}`,
+      secretName: extraConfigSecretName,
       secretObjectValue: {
         kvs_arn: core.SecretValue.unsafePlainText(kvsArn),
         post_auth_hook_url: core.SecretValue.unsafePlainText(props.identityLinkingHookUrl),
@@ -209,7 +217,7 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       config_region: props.authRegion,
     };
 
-    const configPy = this.renderConfigPy(baseSecretName, extraConfigSecret.secretName, props.authRegion, staticOverrides);
+    const configPy = this.renderConfigPy(baseSecretName, extraConfigSecretName, props.authRegion, staticOverrides);
 
     // Shared IAM grants factory for the edge Lambdas.
     const grantCommon = (role: iam.IRole, opts: { kms: boolean; ddb: boolean; kvs: boolean; cognito: boolean; hookSecret: boolean }): void => {

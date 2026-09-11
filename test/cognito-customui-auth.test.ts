@@ -1,3 +1,6 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import * as core from 'aws-cdk-lib';
 import {
   aws_certificatemanager as acm,
@@ -328,5 +331,51 @@ describe('CognitoCustomUiAuth default-behaviour functions (no L1 override)', () 
         functionAssociations: [{ function: geo, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST }],
       },
     })).toThrow(/one function per event type per behaviour/);
+  });
+});
+
+describe('CognitoCustomUiAuth edge config generation', () => {
+  // Regression for the EXTRA_SECRET_NAME unresolved-token bug: the edge Lambdas'
+  // generated config_generated.py must carry the LITERAL extra-config secret
+  // name, never a CDK token. A token (from `extraConfigSecret.secretName`, which
+  // CloudFormation derives from the ARN at deploy time) renders at synth as
+  // `${Token[Fn::Join.NNNN]}`; the edge then calls GetSecretValue with an
+  // invalid name, the extra config (post_auth_hook_url, kvs_arn,
+  // post_auth_hook_secret_arn) never loads, and the identity-linking hook is
+  // silently skipped so no customer_id is ever stamped.
+  test('bakes a LITERAL EXTRA_SECRET_NAME into config_generated.py (no unresolved CDK token)', () => {
+    const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'customui-synth-'));
+    const app = new core.App({ outdir });
+    const stack = new core.Stack(app, 'ConfigGenStack', { env: { account: '123456789012', region: 'us-east-1' } });
+    const cert = acm.Certificate.fromCertificateArn(stack, 'Cert', 'arn:aws:acm:us-east-1:123456789012:certificate/abc');
+    new CognitoCustomUiAuth(stack, 'Auth', {
+      domainNames: ['shop.example.com'],
+      certificate: cert,
+      authSsmParamPrefix: '/auth/shop.example.com',
+      authRegion: 'us-east-1',
+      identityLinkingHookUrl: 'https://shop.example.com/hooks/identity',
+      defaultBehavior: { origin: new origins.HttpOrigin('origin.example.com') },
+    });
+    app.synth();
+
+    // Collect every bundled config_generated.py the local bundler wrote.
+    const configs: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(p);
+        } else if (entry.name === 'config_generated.py') {
+          configs.push(fs.readFileSync(p, 'utf8'));
+        }
+      }
+    };
+    walk(outdir);
+
+    expect(configs.length).toBeGreaterThan(0);
+    for (const content of configs) {
+      expect(content).not.toMatch(/\$\{Token\[/);
+      expect(content).toContain('EXTRA_SECRET_NAME = "cloudfront-customui-config-shop.example.com"');
+    }
   });
 });
