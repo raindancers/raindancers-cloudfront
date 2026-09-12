@@ -378,4 +378,53 @@ describe('CognitoCustomUiAuth edge config generation', () => {
       expect(content).toContain('EXTRA_SECRET_NAME = "cloudfront-customui-config-shop.example.com"');
     }
   });
+
+  // Regression for the EXTRA_SECRET_REGION cross-region bug: the base config
+  // secret lives in authRegion, but extraConfigSecret is created in THIS
+  // construct's own (edge) stack. When those regions differ, a single
+  // Secrets Manager client keyed on CONFIG_REGION looks the extra secret up in
+  // the WRONG region, where it does not exist, so GetSecretValue returns
+  // AccessDenied, the extra config never loads, and the identity-linking hook is
+  // silently skipped. The generated config must bake EXTRA_SECRET_REGION to the
+  // edge-stack region and use a region-specific client for the extra lookup.
+  test('bakes EXTRA_SECRET_REGION and uses a region-specific extra client when regions differ', () => {
+    const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'customui-synth-region-'));
+    const app = new core.App({ outdir });
+    // Edge stack in us-east-1 (where extraConfigSecret is created); base config
+    // secret in eu-west-2 (authRegion) — the real cross-region shape on dev.
+    const stack = new core.Stack(app, 'ConfigGenRegionStack', { env: { account: '123456789012', region: 'us-east-1' } });
+    const cert = acm.Certificate.fromCertificateArn(stack, 'Cert', 'arn:aws:acm:us-east-1:123456789012:certificate/abc');
+    new CognitoCustomUiAuth(stack, 'Auth', {
+      domainNames: ['shop.example.com'],
+      certificate: cert,
+      authSsmParamPrefix: '/auth/shop.example.com',
+      authRegion: 'eu-west-2',
+      identityLinkingHookUrl: 'https://shop.example.com/hooks/identity',
+      defaultBehavior: { origin: new origins.HttpOrigin('origin.example.com') },
+    });
+    app.synth();
+
+    const configs: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(p);
+        } else if (entry.name === 'config_generated.py') {
+          configs.push(fs.readFileSync(p, 'utf8'));
+        }
+      }
+    };
+    walk(outdir);
+
+    expect(configs.length).toBeGreaterThan(0);
+    for (const content of configs) {
+      expect(content).not.toMatch(/\$\{Token\[/);
+      // Base secret is looked up in authRegion; extra secret in the edge-stack region.
+      expect(content).toContain('CONFIG_REGION = "eu-west-2"');
+      expect(content).toContain('EXTRA_SECRET_REGION = "us-east-1"');
+      // The extra lookup must go through the region-specific extra client.
+      expect(content).toContain('_extra_client().get_secret_value(SecretId=EXTRA_SECRET_NAME)');
+    }
+  });
 });
