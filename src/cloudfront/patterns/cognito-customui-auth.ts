@@ -217,7 +217,11 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       config_region: props.authRegion,
     };
 
-    const configPy = this.renderConfigPy(baseSecretName, extraConfigSecretName, props.authRegion, staticOverrides);
+    // The base config secret lives in authRegion, but extraConfigSecret is created
+    // in THIS construct's own stack (us-east-1 for the CloudFront edge stack). The
+    // edge must look each secret up in its own region, so pass both regions through.
+    const extraSecretRegion = core.Stack.of(this).region;
+    const configPy = this.renderConfigPy(baseSecretName, extraConfigSecretName, props.authRegion, extraSecretRegion, staticOverrides);
 
     // Shared IAM grants factory for the edge Lambdas.
     const grantCommon = (role: iam.IRole, opts: { kms: boolean; ddb: boolean; kvs: boolean; cognito: boolean; hookSecret: boolean }): void => {
@@ -508,6 +512,7 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
     baseSecretName: string,
     extraSecretName: string,
     region: string,
+    extraSecretRegion: string,
     staticOverrides: Record<string, string>,
   ): string {
     return [
@@ -519,9 +524,11 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       `BASE_SECRET_NAME = ${JSON.stringify(baseSecretName)}`,
       `EXTRA_SECRET_NAME = ${JSON.stringify(extraSecretName)}`,
       `CONFIG_REGION = ${JSON.stringify(region)}`,
+      `EXTRA_SECRET_REGION = ${JSON.stringify(extraSecretRegion)}`,
       `STATIC_OVERRIDES = ${JSON.stringify(staticOverrides)}`,
       '',
       '_sm = None',
+      '_sm_extra = None',
       '',
       '',
       'def _client():',
@@ -531,10 +538,22 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       '    return _sm',
       '',
       '',
+      'def _extra_client():',
+      '    # The extra-config secret lives in EXTRA_SECRET_REGION (the edge stack region),',
+      '    # which differs from CONFIG_REGION (the base secret in authRegion). Reuse the',
+      '    # base client when the two happen to match, otherwise build a region-specific one.',
+      '    global _sm_extra',
+      '    if EXTRA_SECRET_REGION == CONFIG_REGION:',
+      '        return _client()',
+      '    if _sm_extra is None:',
+      '        _sm_extra = boto3.client("secretsmanager", region_name=EXTRA_SECRET_REGION)',
+      '    return _sm_extra',
+      '',
+      '',
       'def get_config():',
       '    cfg = json.loads(_client().get_secret_value(SecretId=BASE_SECRET_NAME)["SecretString"])',
       '    try:',
-      '        cfg.update(json.loads(_client().get_secret_value(SecretId=EXTRA_SECRET_NAME)["SecretString"]))',
+      '        cfg.update(json.loads(_extra_client().get_secret_value(SecretId=EXTRA_SECRET_NAME)["SecretString"]))',
       '    except Exception as e:',
       '        logger.error("extra config load failed: %s", e)',
       '    cfg.update(STATIC_OVERRIDES)',
