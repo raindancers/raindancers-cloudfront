@@ -13,6 +13,7 @@ import {
 import * as constructs from 'constructs';
 import { Extension, ExtensionConfig, AddBehaviorOptions, RoleMatchMode } from './securedCloudFront';
 import { FunctionComposer } from '../cloudfront-functions/function-composer';
+import { computeEdgeAssetHash } from '../edgeAssetHash';
 
 /**
  * Props for {@link CognitoCustomUiAuth}.
@@ -582,6 +583,12 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       memorySize: 128,
       role: role,
       code: lambda.Code.fromAsset(sourceDir, {
+        // Deterministic hash over the real inputs (source + config + bundled
+        // deps). Without this, CDK hashes the bundling OUTPUT, which drifts every
+        // synth (fs.cpSync does not reproduce a byte-identical tree), publishing a
+        // new Lambda@Edge version on every deploy for byte-identical code.
+        assetHash: computeEdgeAssetHash(sourceDir, configPy, bundledDepsDir),
+        assetHashType: core.AssetHashType.CUSTOM,
         bundling: {
           local: {
             tryBundle(outputDir: string): boolean {
