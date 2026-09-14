@@ -142,11 +142,53 @@ function getOriginalPath(request) {
     return request.uri + '?' + qs;
 }
 
-function redirectToAuth(originalPath, host) {
+// A live PKCE sign-in is represented by the pair of cookies (oauth_state +
+// code_verifier) minted on the redirect that started it. The browser drops both
+// at Max-Age=600, so their PRESENCE (with a well-formed, decodable state) is the
+// practical "unexpired flow" signal available to a CloudFront Function — it has
+// no way to read a cookie's own expiry. Reusing an existing pair instead of
+// minting a new one is what stops a redirect provoked mid-sign-in (e.g. a
+// background notification poll from a sibling panel on the shared cookie domain)
+// from overwriting the state the in-flight sign-in carries, which the callback
+// compares strictly and rejects with "400 Invalid state parameter".
+function inflightAuthFlow(cookies) {
+    if (!cookies) { return null; }
+    var stateCookie = cookies.oauth_state;
+    var verifierCookie = cookies.code_verifier;
+    if (!stateCookie || !stateCookie.value || !verifierCookie || !verifierCookie.value) {
+        return null;
+    }
+    try {
+        JSON.parse(base64urlDecode(stateCookie.value));
+    } catch (e) {
+        return null;
+    }
+    return { state: stateCookie.value, codeVerifier: verifierCookie.value };
+}
+
+function redirectToAuth(originalPath, host, cookies) {
+    var domainAttr = COOKIE_DOMAIN ? '; Domain=' + COOKIE_DOMAIN : '';
+
+    // If a sign-in is already in flight, reissue the redirect REUSING its state
+    // and verifier, and set NO cookies — do not clobber the live flow. The
+    // challenge is re-derived from the stored verifier so the authorize URL stays
+    // consistent with the PKCE exchange the callback performs for whichever flow
+    // completes.
+    var inflight = inflightAuthFlow(cookies);
+    if (inflight) {
+        var reusedChallenge = generateCodeChallenge(inflight.codeVerifier);
+        return {
+            statusCode: 302,
+            headers: {
+                location: { value: buildAzureAuthUrl(inflight.state, reusedChallenge, host) },
+                'cache-control': { value: 'no-store' }
+            }
+        };
+    }
+
     var state = generateState(originalPath, host);
     var codeVerifier = generateCodeVerifier();
     var codeChallenge = generateCodeChallenge(codeVerifier);
-    var domainAttr = COOKIE_DOMAIN ? '; Domain=' + COOKIE_DOMAIN : '';
     return {
         statusCode: 302,
         headers: {
@@ -203,13 +245,13 @@ async function handler(event) {
     // Check for session cookie (supports both __Secure- with domain and __Host- without)
     var sessionCookie = cookies['__Secure-auth_session'] || cookies['__Host-auth_session'];
     if (!sessionCookie) {
-        return redirectToAuth(getOriginalPath(request), host);
+        return redirectToAuth(getOriginalPath(request), host, request.cookies);
     }
     
     var token = sessionCookie.value;
     
     if (!token || token.length === 0) {
-        return redirectToAuth(getOriginalPath(request), host);
+        return redirectToAuth(getOriginalPath(request), host, request.cookies);
     }
     
     try {
@@ -217,12 +259,12 @@ async function handler(event) {
         var parts = token.split('.');
         
         if (parts.length !== 3) {
-            return redirectToAuth(originalPath, host);
+            return redirectToAuth(originalPath, host, request.cookies);
         }
         
         var isValid = await validateHmacSignature(token);
         if (!isValid) {
-            return redirectToAuth(originalPath, host);
+            return redirectToAuth(originalPath, host, request.cookies);
         }
         
         var payload = JSON.parse(base64urlDecode(parts[1]));
@@ -232,7 +274,7 @@ async function handler(event) {
             if (ENABLE_REFRESH) {
                 return redirectToRefresh(originalPath, host);
             }
-            return redirectToAuth(originalPath, host);
+            return redirectToAuth(originalPath, host, request.cookies);
         }
         
         // Check if session is revoked (denylist approach)
@@ -242,7 +284,7 @@ async function handler(event) {
                 var isRevoked = await kvsHandle.get('revoked:' + jti);
                 if (isRevoked) {
                     console.log('Session revoked: ' + jti);
-                    return redirectToAuth(originalPath, host);
+                    return redirectToAuth(originalPath, host, request.cookies);
                 }
             } catch (e) {
                 console.log('KVS error checking revocation: ' + e);
@@ -265,6 +307,6 @@ async function handler(event) {
         
         return request;
     } catch (e) {
-        return redirectToAuth(getOriginalPath(request), host);
+        return redirectToAuth(getOriginalPath(request), host, request.cookies);
     }
 }
