@@ -121,7 +121,47 @@ function getOriginalPath(request) {
   return request.uri + '?' + qs;
 }
 
-function redirectToAuth(originalPath) {
+// A live PKCE sign-in is represented by the pair of cookies (oauth_state +
+// code_verifier) minted on the redirect that started it. The browser drops both
+// at Max-Age=600, so their PRESENCE (with a well-formed, decodable state) is the
+// practical "unexpired flow" signal available to a CloudFront Function — it has
+// no way to read a cookie's own expiry. Reusing an existing pair instead of
+// minting a new one is what stops a redirect provoked mid-sign-in (e.g. a
+// background notification poll from a sibling panel on the shared cookie domain)
+// from overwriting the state the in-flight sign-in carries, which the callback
+// compares strictly and rejects with "400 Invalid state parameter".
+function inflightAuthFlow(cookies) {
+  if (!cookies) { return null; }
+  var stateCookie = cookies.oauth_state;
+  var verifierCookie = cookies.code_verifier;
+  if (!stateCookie || !stateCookie.value || !verifierCookie || !verifierCookie.value) {
+    return null;
+  }
+  try {
+    JSON.parse(base64urlDecode(stateCookie.value));
+  } catch (e) {
+    return null;
+  }
+  return { state: stateCookie.value, codeVerifier: verifierCookie.value };
+}
+
+function redirectToAuth(originalPath, cookies) {
+  // If a sign-in is already in flight, reissue the redirect REUSING its state and
+  // verifier, and set NO cookies — do not clobber the live flow. The challenge is
+  // re-derived from the stored verifier so the authorize URL stays consistent with
+  // the PKCE exchange the callback performs for whichever flow completes.
+  var inflight = inflightAuthFlow(cookies);
+  if (inflight) {
+    var reusedChallenge = generateCodeChallenge(inflight.codeVerifier);
+    return {
+      statusCode: 302,
+      headers: {
+        location: { value: buildCognitoAuthUrl(inflight.state, reusedChallenge) },
+        'cache-control': { value: 'no-store' }
+      }
+    };
+  }
+
   var state = generateState(originalPath);
   var codeVerifier = generateCodeVerifier();
   var codeChallenge = generateCodeChallenge(codeVerifier);
@@ -155,32 +195,32 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
   var cookies = request.cookies;
   var originalPath = getOriginalPath(request);
   if (!cookies['__Host-auth_session']) {
-    return { pass: false, response: redirectToAuth(originalPath) };
+    return { pass: false, response: redirectToAuth(originalPath, request.cookies) };
   }
   var token = cookies['__Host-auth_session'].value;
   if (!token || token.length === 0) {
-    return { pass: false, response: redirectToAuth(originalPath) };
+    return { pass: false, response: redirectToAuth(originalPath, request.cookies) };
   }
   try {
     var parts = token.split('.');
     if (parts.length !== 3) {
-      return { pass: false, response: redirectToAuth(originalPath) };
+      return { pass: false, response: redirectToAuth(originalPath, request.cookies) };
     }
     var isValid = await validateHmacSignature(token);
     if (!isValid) {
-      return { pass: false, response: redirectToAuth(originalPath) };
+      return { pass: false, response: redirectToAuth(originalPath, request.cookies) };
     }
     var payload = JSON.parse(base64urlDecode(parts[1]));
     var now = Math.floor(Date.now() / 1000);
     if (payload.exp && payload.exp < now) {
-      return { pass: false, response: redirectToAuth(originalPath) };
+      return { pass: false, response: redirectToAuth(originalPath, request.cookies) };
     }
     var jti = payload.jti;
     if (jti) {
       try {
         var isRevoked = await kvsHandle.get('revoked:' + jti);
         if (isRevoked) {
-          return { pass: false, response: redirectToAuth(originalPath) };
+          return { pass: false, response: redirectToAuth(originalPath, request.cookies) };
         }
       } catch (e) {}
     }
@@ -218,6 +258,6 @@ async function checkAuth(event, decodedPayload, requiredRoles, roleMatchMode) {
 
     return { pass: true, payload: payload };
   } catch (e) {
-    return { pass: false, response: redirectToAuth(originalPath) };
+    return { pass: false, response: redirectToAuth(originalPath, request.cookies) };
   }
 }
