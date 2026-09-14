@@ -14,7 +14,7 @@ import {
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
 import { AuthSecurityTable } from '../authSecurityTable';
-import { FunctionComposer } from '../cloudfront-functions/function-composer';
+import { FunctionComposer, minifyFunctionCode } from '../cloudfront-functions/function-composer';
 
 /**
  * Compute a deterministic hash for a Lambda asset bundle based on source
@@ -804,7 +804,20 @@ def get_config():
       code = code.replace(/HEADER_INJECTION_KEYS_PLACEHOLDER/g, '[]');
     }
     code = code.replace(/ENABLE_REFRESH_PLACEHOLDER/g, String(this.enableRefreshEndpoint));
-    return code;
+
+    // Minify to stay under CloudFront's 10KB function-size limit. terser cannot
+    // parse the ES `import` in script mode, and CloudFront needs the import,
+    // `var crypto = require('crypto')`, and `const kvsHandle = cf.kvs()` at the
+    // top level, so extract that preamble, minify the body, and prepend it back —
+    // the same shape FunctionComposer.compose() uses.
+    const cfImport = "import cf from 'cloudfront';\n";
+    const cryptoRequire = "var crypto = require('crypto');\n";
+    const kvsDecl = 'const kvsHandle = cf.kvs();\n';
+    const body = code
+      .replace(/import cf from 'cloudfront';\s*/g, '')
+      .replace(/var crypto = require\('crypto'\);\s*/g, '')
+      .replace(/const kvsHandle = cf\.kvs\(\);\s*/g, '');
+    return cfImport + cryptoRequire + kvsDecl + minifyFunctionCode(body);
   }
 
   private loadAndReplaceUserInfoCode(nameFields: string[]): string {

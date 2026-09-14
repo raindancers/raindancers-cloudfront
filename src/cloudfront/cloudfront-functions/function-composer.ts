@@ -25,6 +25,49 @@ export interface ComposerConfig {
 }
 
 /**
+ * Minify CloudFront Function source with terser.
+ *
+ * CloudFront Functions have a hard 10KB code-size limit. Both the composed
+ * (multi-module) path and the standalone auth-check path must minify, using
+ * the SAME options, so a function that fits in one path fits in the other.
+ *
+ * `minify_sync` throws on a parse error and, in its documented failure mode,
+ * can return `{ error }` with no `code`. An earlier `minified.code || assembled`
+ * fallback caught that second case and silently shipped the UN-minified source,
+ * which is how an 11KB function reached CloudFront and 413'd at deploy. This
+ * helper never falls back: a thrown error propagates, and a missing `code` is
+ * turned into a thrown error too — a minify failure is always a build error.
+ *
+ * The `reserved` names are the CloudFront-required top-level identifiers that
+ * must survive mangling.
+ */
+export function minifyFunctionCode(source: string): string {
+  const result = minify_sync(source, {
+    compress: {
+      dead_code: true,
+      drop_console: false,
+      passes: 2,
+    },
+    mangle: {
+      reserved: ['handler', 'event', 'kvsHandle'],
+    },
+    format: {
+      comments: false,
+    },
+  });
+
+  // `minify_sync` returns `{ error }` (not typed by @types/terser) instead of
+  // throwing; `code` is undefined on failure. Treat a missing `code` as the
+  // failure signal and surface the runtime error if terser attached one.
+  if (result.code === undefined) {
+    const err = (result as { error?: Error }).error;
+    throw new Error(`CloudFront Function minification failed: ${err ?? 'terser produced no output'}`);
+  }
+
+  return result.code;
+}
+
+/**
  * Generates a combined CloudFront Function from modular check functions
  * based on requested extensions
  */
@@ -125,22 +168,10 @@ export class FunctionComposer {
     assembled = assembled.replace(/const kvsHandle = cf\.kvs\(\);\s*/g, '');
 
     // Minify with terser to stay well under the 10KB CloudFront Function limit.
-    const minified = minify_sync(assembled, {
-      compress: {
-        dead_code: true,
-        drop_console: false,
-        passes: 2,
-      },
-      mangle: {
-        reserved: ['handler', 'event', 'kvsHandle'],
-      },
-      format: {
-        comments: false,
-      },
-    });
+    const minified = minifyFunctionCode(assembled);
 
     // Prepend the CloudFront-specific preamble back
-    const code = cfImport + cryptoRequire + kvsDecl + (minified.code || assembled);
+    const code = cfImport + cryptoRequire + kvsDecl + minified;
     const sizeKB = Buffer.byteLength(code, 'utf-8') / 1024;
 
     if (sizeKB > 10) {
