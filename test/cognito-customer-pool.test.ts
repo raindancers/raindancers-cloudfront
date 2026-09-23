@@ -1,4 +1,5 @@
 import * as core from 'aws-cdk-lib';
+import { aws_kms as kms, aws_lambda as lambda } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { CognitoCustomerPool } from '../src/cloudfront/patterns/cognitoCustomerPool';
 
@@ -73,5 +74,89 @@ describe('CognitoCustomerPool', () => {
       cognitoDomainPrefix: 'x',
       appClients: [],
     })).toThrow(/at least one app client/);
+  });
+
+  describe('custom email sender + EMAIL_OTP MFA', () => {
+    function withSender(stack: core.Stack, extra?: Record<string, unknown>) {
+      const fn = new lambda.Function(stack, 'Sender', {
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('exports.handler = async () => {};'),
+      });
+      const key = new kms.Key(stack, 'SenderKey');
+      return new CognitoCustomerPool(stack, 'Pool', {
+        cognitoDomainPrefix: 'shop-brand',
+        appClients: [{ key: 'uk', callbackUrls: ['https://uk.example.com/oauth2/callback'] }],
+        customEmailSenderLambda: fn,
+        customSenderKmsKey: key,
+        ...extra,
+      } as never);
+    }
+
+    test('wires the CUSTOM_EMAIL_SENDER trigger and KMS key when both props are set', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      withSender(stack);
+      const t = Template.fromStack(stack);
+      t.hasResourceProperties('AWS::Cognito::UserPool', {
+        LambdaConfig: Match.objectLike({
+          CustomEmailSender: Match.objectLike({ LambdaArn: Match.anyValue(), LambdaVersion: 'V1_0' }),
+          KMSKeyID: Match.anyValue(),
+        }),
+      });
+    });
+
+    test('emailOtpMfa sets EnabledMfas to EMAIL_OTP only (via L1) and never TOTP/SMS', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      withSender(stack, { emailOtpMfa: true });
+      const t = Template.fromStack(stack);
+      t.hasResourceProperties('AWS::Cognito::UserPool', {
+        MfaConfiguration: 'ON',
+        EnabledMfas: ['EMAIL_OTP'],
+      });
+      // Property P4: the email-only pool never carries the other factors.
+      const pool = Object.values(t.findResources('AWS::Cognito::UserPool'))[0] as { Properties: { EnabledMfas: string[] } };
+      expect(pool.Properties.EnabledMfas).not.toContain('SOFTWARE_TOKEN_MFA');
+      expect(pool.Properties.EnabledMfas).not.toContain('SMS_MFA');
+    });
+
+    test('baseline unchanged: no custom sender props => no CustomEmailSender / KMSKeyID', () => {
+      const t = synth();
+      const pool = Object.values(t.findResources('AWS::Cognito::UserPool'))[0] as { Properties: { LambdaConfig?: Record<string, unknown> } };
+      const lambdaConfig = pool.Properties.LambdaConfig ?? {};
+      expect(lambdaConfig).not.toHaveProperty('CustomEmailSender');
+      expect(lambdaConfig).not.toHaveProperty('KMSKeyID');
+    });
+
+    test('rejects the Lambda without the KMS key (and vice versa)', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      const fn = new lambda.Function(stack, 'Sender', {
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('exports.handler = async () => {};'),
+      });
+      expect(() => new CognitoCustomerPool(stack, 'P1', {
+        cognitoDomainPrefix: 'x',
+        appClients: [{ key: 'uk' }],
+        customEmailSenderLambda: fn,
+      } as never)).toThrow(/must be provided together/);
+      expect(() => new CognitoCustomerPool(stack, 'P2', {
+        cognitoDomainPrefix: 'x',
+        appClients: [{ key: 'uk' }],
+        customSenderKmsKey: new kms.Key(stack, 'K'),
+      } as never)).toThrow(/must be provided together/);
+    });
+
+    test('rejects emailOtpMfa without a custom email sender', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      expect(() => new CognitoCustomerPool(stack, 'P', {
+        cognitoDomainPrefix: 'x',
+        appClients: [{ key: 'uk' }],
+        emailOtpMfa: true,
+      } as never)).toThrow(/emailOtpMfa requires customEmailSenderLambda/);
+    });
   });
 });

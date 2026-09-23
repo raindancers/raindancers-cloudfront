@@ -3,6 +3,7 @@ import * as core from 'aws-cdk-lib';
 import {
   aws_cognito as cognito,
   aws_iam as iam,
+  aws_kms as kms,
   aws_lambda as lambda,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
@@ -84,6 +85,36 @@ export interface CognitoCustomerPoolProps {
    */
   readonly preTokenGenerationLambda?: lambda.IFunction;
   /**
+   * Enable email one-time-password (`EMAIL_OTP`) as the MFA second factor, delivered
+   * by {@link customEmailSenderLambda}. This is set via an L1 override on the
+   * underlying `CfnUserPool` (`EnabledMfas: ['EMAIL_OTP']`) rather than
+   * `mfaSecondFactor.email`, because the CDK L2 requires a managed (`DEVELOPER`) SES
+   * `email` config for `mfaSecondFactor.email` — which is incompatible with a
+   * custom-email-sender-only delivery path. Requires {@link customEmailSenderLambda}
+   * and {@link customSenderKmsKey}, and a pool feature plan of Essentials or higher.
+   * When true, any `otp`/`sms` in {@link mfaSecondFactor} is ignored — EMAIL_OTP is
+   * the sole factor.
+   * @default false
+   */
+  readonly emailOtpMfa?: boolean;
+  /**
+   * Custom Email Sender Lambda. When set (together with {@link customSenderKmsKey}),
+   * it is wired to the pool via the `CUSTOM_EMAIL_SENDER` trigger and Cognito
+   * delivers all customer emails (MFA codes, verification, temporary passwords)
+   * through this Lambda instead of its default sender or a managed SES sender.
+   * Cognito encrypts each code to {@link customSenderKmsKey}; the Lambda decrypts
+   * it with the AWS Encryption SDK before sending. Requires {@link customSenderKmsKey}.
+   * @default - Cognito's default email delivery
+   */
+  readonly customEmailSenderLambda?: lambda.IFunction;
+  /**
+   * Symmetric KMS key Cognito uses to encrypt codes for {@link customEmailSenderLambda}.
+   * Required when a custom email sender is provided; ignored otherwise. Cognito is
+   * granted encrypt/decrypt on it; the Lambda must be separately granted decrypt.
+   * @default - no key (only valid when no custom email sender is set)
+   */
+  readonly customSenderKmsKey?: kms.IKey;
+  /**
    * L1 account-takeover risk configuration (requires {@link advancedSecurityMode}
    * ENFORCED/AUDIT). Passed through to CfnUserPoolRiskConfigurationAttachment.
    */
@@ -125,13 +156,34 @@ export class CognitoCustomerPool extends constructs.Construct {
       throw new Error('CognitoCustomerPool requires at least one app client');
     }
 
+    if ((props.customEmailSenderLambda === undefined) !== (props.customSenderKmsKey === undefined)) {
+      throw new Error(
+        'CognitoCustomerPool: customEmailSenderLambda and customSenderKmsKey must be provided together — '
+        + 'a custom email sender requires a KMS key for Cognito to encrypt codes to, and the key is unused without the Lambda.',
+      );
+    }
+
+    if (props.emailOtpMfa && !props.customEmailSenderLambda) {
+      throw new Error(
+        'CognitoCustomerPool: emailOtpMfa requires customEmailSenderLambda (and customSenderKmsKey) — '
+        + 'EMAIL_OTP codes are delivered by the custom email sender, so email MFA cannot be enabled without it.',
+      );
+    }
+
+    // With emailOtpMfa, EMAIL_OTP is the sole factor and is applied via an L1
+    // override below; do NOT pass mfaSecondFactor.email to the L2 (its validateEmailMfa
+    // demands a managed DEVELOPER SES config, which the custom-sender path avoids).
+    const l2MfaSecondFactor = props.emailOtpMfa
+      ? { otp: false, sms: false }
+      : (props.mfaSecondFactor ?? { otp: true, sms: false });
+
     this.userPool = new cognito.UserPool(this, 'UserPool', {
       userPoolName: props.userPoolName,
       selfSignUpEnabled: props.selfSignUpEnabled ?? false,
       signInAliases: { email: true },
       signInCaseSensitive: false,
       mfa: props.mfa ?? cognito.Mfa.REQUIRED,
-      mfaSecondFactor: props.mfaSecondFactor ?? { otp: true, sms: false },
+      mfaSecondFactor: l2MfaSecondFactor,
       passwordPolicy: props.passwordPolicy ?? {
         minLength: 12,
         requireLowercase: true,
@@ -144,8 +196,24 @@ export class CognitoCustomerPool extends constructs.Construct {
       customAttributes: props.customAttributes,
       autoVerify: { email: true },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      // Custom Email Sender: when provided, Cognito routes every customer email
+      // through this Lambda and encrypts codes to customSenderKmsKey. Both must be
+      // set on the pool at construction — the KMS key is not settable via addTrigger.
+      customSenderKmsKey: props.customSenderKmsKey,
+      lambdaTriggers: props.customEmailSenderLambda
+        ? { customEmailSender: props.customEmailSenderLambda }
+        : undefined,
       removalPolicy: props.removalPolicy ?? core.RemovalPolicy.RETAIN,
     });
+
+    // L1 escape hatch: enable EMAIL_OTP as the only MFA factor. The L2 cannot express
+    // "email MFA delivered solely by a custom sender" (see emailOtpMfa docs), so set
+    // EnabledMfas directly on the underlying CfnUserPool. The custom email sender
+    // delivers the code; no managed SES email configuration is required.
+    if (props.emailOtpMfa) {
+      const cfnPool = this.userPool.node.defaultChild as cognito.CfnUserPool;
+      cfnPool.enabledMfas = ['EMAIL_OTP'];
+    }
 
     const preTokenLambda = props.preTokenGenerationLambda ?? new lambda.Function(this, 'PreTokenLambda', {
       runtime: lambda.Runtime.PYTHON_3_12,
