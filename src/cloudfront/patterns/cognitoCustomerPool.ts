@@ -29,6 +29,30 @@ export interface CognitoAppClientSpec {
 }
 
 /**
+ * Same-account SES email configuration for the pool. Synthesises an
+ * `EmailConfiguration` with `EmailSendingAccount: DEVELOPER`. Its purpose is to
+ * satisfy Cognito's precondition for enabling EMAIL_OTP MFA — Cognito requires a
+ * verified same-account SES identity on the pool before it will accept
+ * `EnabledMfas: ['EMAIL_OTP']`, independently of any custom email sender that
+ * overrides actual delivery.
+ */
+export interface CognitoCustomerPoolEmailConfig {
+  /**
+   * ARN of a VERIFIED SES identity in the POOL's OWN account (domain identity
+   * preferred; a verified email-address identity also works). Passed to Cognito as
+   * the `EmailConfiguration.SourceArn`. Must be in the pool's region.
+   */
+  readonly sesVerifiedDomainArn: string;
+  /**
+   * The From address for the pool's SES configuration, e.g.
+   * `2fa@alpha.functionalself.com`. A local-part on the verified identity's domain.
+   */
+  readonly fromEmail: string;
+  /** Optional display name, e.g. "Functional Self". @default - address only */
+  readonly fromName?: string;
+}
+
+/**
  * Optional Cognito Identity Pool + ABAC (attributes-for-access-control) config.
  * Maps token claims to principal tags so downstream IAM can scope on them.
  */
@@ -115,6 +139,22 @@ export interface CognitoCustomerPoolProps {
    */
   readonly customSenderKmsKey?: kms.IKey;
   /**
+   * Same-account SES email configuration for the pool. REQUIRED when
+   * {@link emailOtpMfa} is set: Cognito refuses to enable EMAIL_OTP MFA unless the
+   * pool carries an `EmailSendingAccount: DEVELOPER` configuration pointing at a
+   * VERIFIED SES identity in the pool's OWN account — this precondition is validated
+   * at the pool-config layer, BEFORE any email is routed, so a
+   * {@link customEmailSenderLambda} (which overrides delivery) does not satisfy it.
+   *
+   * The identity here exists only to satisfy that enablement precondition; when a
+   * custom email sender is attached, Cognito never actually sends through this
+   * identity (the Lambda intercepts every email), so a cross-account or
+   * SES-sandbox delivery path is unaffected. Prefer a verified DOMAIN identity;
+   * a verified email-address identity also works if Cognito rejects the domain form.
+   * @default - no SES config (Cognito default sender; not valid with emailOtpMfa)
+   */
+  readonly emailConfiguration?: CognitoCustomerPoolEmailConfig;
+  /**
    * L1 account-takeover risk configuration (requires {@link advancedSecurityMode}
    * ENFORCED/AUDIT). Passed through to CfnUserPoolRiskConfigurationAttachment.
    */
@@ -170,20 +210,29 @@ export class CognitoCustomerPool extends constructs.Construct {
       );
     }
 
+    if (props.emailOtpMfa && !props.emailConfiguration) {
+      throw new Error(
+        'CognitoCustomerPool: emailOtpMfa requires emailConfiguration — '
+        + 'Cognito refuses to enable EMAIL_OTP MFA unless the pool carries a DEVELOPER SES '
+        + 'EmailConfiguration on a verified same-account identity. This precondition is checked '
+        + 'before any email is routed, so the custom email sender does not satisfy it.',
+      );
+    }
+
     // With emailOtpMfa, EMAIL_OTP is the sole factor and is applied via an L1
     // override below; do NOT pass mfaSecondFactor.email to the L2 (its validateEmailMfa
-    // demands a managed DEVELOPER SES config, which the custom-sender path avoids).
+    // demands a `email` UserPoolEmail be set, which we supply separately via
+    // emailConfiguration — see the `email` prop below).
     const l2MfaSecondFactor = props.emailOtpMfa
       ? { otp: false, sms: false }
       : (props.mfaSecondFactor ?? { otp: true, sms: false });
 
-    // Account recovery must not be email-only when EMAIL_OTP MFA is enabled:
+    const accountRecovery = props.emailOtpMfa
     // Cognito rejects EmailMfaConfiguration unless AccountRecoverySetting has at
     // least one mechanism other than verified_email (recovering email-based MFA via
     // email is circular). AccountRecovery.NONE maps to the admin_only mechanism, which
     // satisfies the constraint without introducing an SMS/phone factor into this
     // passwordless-email design. Otherwise keep the email-only default.
-    const accountRecovery = props.emailOtpMfa
       ? cognito.AccountRecovery.NONE
       : cognito.AccountRecovery.EMAIL_ONLY;
 
@@ -219,7 +268,24 @@ export class CognitoCustomerPool extends constructs.Construct {
     // L1 escape hatch: enable EMAIL_OTP as the only MFA factor. The L2 cannot express
     // "email MFA delivered solely by a custom sender" (see emailOtpMfa docs), so set
     // EnabledMfas directly on the underlying CfnUserPool. The custom email sender
-    // delivers the code; no managed SES email configuration is required.
+    // delivers the code, but Cognito still requires a DEVELOPER SES EmailConfiguration
+    // on a verified same-account identity as an ENABLEMENT precondition (below).
+    if (props.emailConfiguration) {
+      // Set EmailConfiguration via L1 with the caller's exact verified same-account
+      // identity ARN — accepting either a domain or an email-address identity without
+      // CDK re-deriving the ARN from the From address. This satisfies Cognito's
+      // EMAIL_OTP enablement precondition; the custom email sender still overrides
+      // actual delivery, so this identity is never sent through.
+      const cfnPool = this.userPool.node.defaultChild as cognito.CfnUserPool;
+      cfnPool.emailConfiguration = {
+        emailSendingAccount: 'DEVELOPER',
+        sourceArn: props.emailConfiguration.sesVerifiedDomainArn,
+        from: props.emailConfiguration.fromName
+          ? `${props.emailConfiguration.fromName} <${props.emailConfiguration.fromEmail}>`
+          : props.emailConfiguration.fromEmail,
+      };
+    }
+
     if (props.emailOtpMfa) {
       const cfnPool = this.userPool.node.defaultChild as cognito.CfnUserPool;
       cfnPool.enabledMfas = ['EMAIL_OTP'];
