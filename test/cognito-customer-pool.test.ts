@@ -89,6 +89,11 @@ describe('CognitoCustomerPool', () => {
         appClients: [{ key: 'uk', callbackUrls: ['https://uk.example.com/oauth2/callback'] }],
         customEmailSenderLambda: fn,
         customSenderKmsKey: key,
+        emailConfiguration: {
+          sesVerifiedDomainArn: 'arn:aws:ses:eu-west-2:123456789012:identity/alpha.example.com',
+          fromEmail: '2fa@alpha.example.com',
+          fromName: 'Example',
+        },
         ...extra,
       } as never);
     }
@@ -119,6 +124,41 @@ describe('CognitoCustomerPool', () => {
       const pool = Object.values(t.findResources('AWS::Cognito::UserPool'))[0] as { Properties: { EnabledMfas: string[] } };
       expect(pool.Properties.EnabledMfas).not.toContain('SOFTWARE_TOKEN_MFA');
       expect(pool.Properties.EnabledMfas).not.toContain('SMS_MFA');
+    });
+
+    test('emailConfiguration synthesises a DEVELOPER EmailConfiguration on the same-account identity (EMAIL_OTP enablement precondition)', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      withSender(stack, { emailOtpMfa: true });
+      const t = Template.fromStack(stack);
+      // Cognito refuses EMAIL_OTP unless the pool carries a DEVELOPER SES config on a
+      // verified same-account identity — a pool-config precondition the custom sender
+      // does not satisfy. The From carries the display name.
+      t.hasResourceProperties('AWS::Cognito::UserPool', {
+        EmailConfiguration: {
+          EmailSendingAccount: 'DEVELOPER',
+          SourceArn: 'arn:aws:ses:eu-west-2:123456789012:identity/alpha.example.com',
+          From: 'Example <2fa@alpha.example.com>',
+        },
+      });
+    });
+
+    test('rejects emailOtpMfa without emailConfiguration', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      const fn = new lambda.Function(stack, 'Sender', {
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('exports.handler = async () => {};'),
+      });
+      const key = new kms.Key(stack, 'SenderKey');
+      expect(() => new CognitoCustomerPool(stack, 'P', {
+        cognitoDomainPrefix: 'x',
+        appClients: [{ key: 'uk' }],
+        customEmailSenderLambda: fn,
+        customSenderKmsKey: key,
+        emailOtpMfa: true,
+      } as never)).toThrow(/emailOtpMfa requires emailConfiguration/);
     });
 
     test('emailOtpMfa uses admin_only account recovery, never verified_email (Cognito rejects EMAIL_OTP + email-only recovery)', () => {
