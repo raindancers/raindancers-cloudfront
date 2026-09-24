@@ -177,6 +177,16 @@ export class CognitoCustomerPool extends constructs.Construct {
       ? { otp: false, sms: false }
       : (props.mfaSecondFactor ?? { otp: true, sms: false });
 
+    // Account recovery must not be email-only when EMAIL_OTP MFA is enabled:
+    // Cognito rejects EmailMfaConfiguration unless AccountRecoverySetting has at
+    // least one mechanism other than verified_email (recovering email-based MFA via
+    // email is circular). AccountRecovery.NONE maps to the admin_only mechanism, which
+    // satisfies the constraint without introducing an SMS/phone factor into this
+    // passwordless-email design. Otherwise keep the email-only default.
+    const accountRecovery = props.emailOtpMfa
+      ? cognito.AccountRecovery.NONE
+      : cognito.AccountRecovery.EMAIL_ONLY;
+
     this.userPool = new cognito.UserPool(this, 'UserPool', {
       userPoolName: props.userPoolName,
       selfSignUpEnabled: props.selfSignUpEnabled ?? false,
@@ -195,7 +205,7 @@ export class CognitoCustomerPool extends constructs.Construct {
       standardAttributes: props.standardAttributes,
       customAttributes: props.customAttributes,
       autoVerify: { email: true },
-      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      accountRecovery,
       // Custom Email Sender: when provided, Cognito routes every customer email
       // through this Lambda and encrypts codes to customSenderKmsKey. Both must be
       // set on the pool at construction — the KMS key is not settable via addTrigger.

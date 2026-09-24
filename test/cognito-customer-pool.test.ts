@@ -121,12 +121,34 @@ describe('CognitoCustomerPool', () => {
       expect(pool.Properties.EnabledMfas).not.toContain('SMS_MFA');
     });
 
+    test('emailOtpMfa uses admin_only account recovery, never verified_email (Cognito rejects EMAIL_OTP + email-only recovery)', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      withSender(stack, { emailOtpMfa: true });
+      const t = Template.fromStack(stack);
+      // Cognito rejects EmailMfaConfiguration when the only recovery mechanism is
+      // verified_email. The construct must fall back to admin_only (AccountRecovery.NONE).
+      t.hasResourceProperties('AWS::Cognito::UserPool', {
+        AccountRecoverySetting: {
+          RecoveryMechanisms: [{ Name: 'admin_only', Priority: 1 }],
+        },
+      });
+      const pool = Object.values(t.findResources('AWS::Cognito::UserPool'))[0] as {
+        Properties: { AccountRecoverySetting: { RecoveryMechanisms: Array<{ Name: string }> } };
+      };
+      const names = pool.Properties.AccountRecoverySetting.RecoveryMechanisms.map((m) => m.Name);
+      expect(names).not.toContain('verified_email');
+      expect(names).not.toContain('verified_phone_number');
+    });
+
     test('baseline unchanged: no custom sender props => no CustomEmailSender / KMSKeyID', () => {
       const t = synth();
-      const pool = Object.values(t.findResources('AWS::Cognito::UserPool'))[0] as { Properties: { LambdaConfig?: Record<string, unknown> } };
+      const pool = Object.values(t.findResources('AWS::Cognito::UserPool'))[0] as { Properties: { LambdaConfig?: Record<string, unknown>; AccountRecoverySetting?: { RecoveryMechanisms: Array<{ Name: string }> } } };
       const lambdaConfig = pool.Properties.LambdaConfig ?? {};
       expect(lambdaConfig).not.toHaveProperty('CustomEmailSender');
       expect(lambdaConfig).not.toHaveProperty('KMSKeyID');
+      // Baseline pool keeps email-only recovery (no emailOtpMfa in play).
+      expect(pool.Properties.AccountRecoverySetting?.RecoveryMechanisms).toEqual([{ Name: 'verified_email', Priority: 1 }]);
     });
 
     test('rejects the Lambda without the KMS key (and vice versa)', () => {
