@@ -221,4 +221,80 @@ describe('CognitoCustomerPool', () => {
       } as never)).toThrow(/emailOtpMfa requires customEmailSenderLambda/);
     });
   });
+
+  describe('passwordless email-OTP (choice-based first factor)', () => {
+    function withPasswordless(stack: core.Stack, extra?: Record<string, unknown>) {
+      const fn = new lambda.Function(stack, 'Sender', {
+        runtime: lambda.Runtime.NODEJS_20_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline('exports.handler = async () => {};'),
+      });
+      const key = new kms.Key(stack, 'SenderKey');
+      return new CognitoCustomerPool(stack, 'Pool', {
+        cognitoDomainPrefix: 'shop-brand',
+        appClients: [{ key: 'uk', callbackUrls: ['https://uk.example.com/oauth2/callback'] }],
+        customEmailSenderLambda: fn,
+        customSenderKmsKey: key,
+        emailConfiguration: {
+          sesVerifiedDomainArn: 'arn:aws:ses:eu-west-2:123456789012:identity/alpha.example.com',
+          fromEmail: '2fa@alpha.example.com',
+          fromName: 'Example',
+        },
+        passwordlessEmailOtp: true,
+        ...extra,
+      } as never);
+    }
+
+    test('sets AllowedFirstAuthFactors to [PASSWORD, EMAIL_OTP] and MFA OFF', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      withPasswordless(stack);
+      const t = Template.fromStack(stack);
+      const pool = Object.values(t.findResources('AWS::Cognito::UserPool'))[0] as {
+        Properties: { Policies: { SignInPolicy: { AllowedFirstAuthFactors: string[] } }; MfaConfiguration: string };
+      };
+      expect(pool.Properties.Policies.SignInPolicy.AllowedFirstAuthFactors).toEqual(['PASSWORD', 'EMAIL_OTP']);
+      expect(pool.Properties.MfaConfiguration).toBe('OFF');
+    });
+
+    test('app client enables the USER_AUTH (choice-based) flow and drops userSrp/password', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      withPasswordless(stack);
+      const t = Template.fromStack(stack);
+      const client = Object.values(t.findResources('AWS::Cognito::UserPoolClient'))[0] as {
+        Properties: { ExplicitAuthFlows: string[] };
+      };
+      expect(client.Properties.ExplicitAuthFlows).toContain('ALLOW_USER_AUTH');
+      expect(client.Properties.ExplicitAuthFlows).not.toContain('ALLOW_USER_SRP_AUTH');
+      expect(client.Properties.ExplicitAuthFlows).not.toContain('ALLOW_USER_PASSWORD_AUTH');
+      expect(client.Properties.ExplicitAuthFlows).not.toContain('ALLOW_ADMIN_USER_PASSWORD_AUTH');
+    });
+
+    test('retains the custom email sender + KMS key (first-factor code delivery)', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      withPasswordless(stack);
+      const t = Template.fromStack(stack);
+      t.hasResourceProperties('AWS::Cognito::UserPool', {
+        LambdaConfig: Match.objectLike({ CustomEmailSender: Match.objectLike({ LambdaVersion: 'V1_0' }) }),
+      });
+    });
+
+    test('rejects passwordlessEmailOtp combined with emailOtpMfa (mutually exclusive)', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      expect(() => withPasswordless(stack, { emailOtpMfa: true })).toThrow(/mutually exclusive/);
+    });
+
+    test('rejects passwordlessEmailOtp without a custom email sender + emailConfiguration', () => {
+      const app = new core.App();
+      const stack = new core.Stack(app, 'S', { env: { account: '123456789012', region: 'eu-west-2' } });
+      expect(() => new CognitoCustomerPool(stack, 'P', {
+        cognitoDomainPrefix: 'x',
+        appClients: [{ key: 'uk' }],
+        passwordlessEmailOtp: true,
+      } as never)).toThrow(/passwordlessEmailOtp requires customEmailSenderLambda/);
+    });
+  });
 });
