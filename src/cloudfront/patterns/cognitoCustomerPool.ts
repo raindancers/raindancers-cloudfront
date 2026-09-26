@@ -122,6 +122,29 @@ export interface CognitoCustomerPoolProps {
    */
   readonly emailOtpMfa?: boolean;
   /**
+   * Configure the pool for PASSWORDLESS customer sign-in using choice-based
+   * authentication (`USER_AUTH`) with `EMAIL_OTP` as a first auth factor. The
+   * customer signs in with just their email and a one-time code — no password and
+   * no second factor. Delivered by {@link customEmailSenderLambda}; requires
+   * {@link customSenderKmsKey} and {@link emailConfiguration} (same enablement
+   * precondition as {@link emailOtpMfa}), and an Essentials-or-higher feature plan.
+   *
+   * Hard Cognito constraints this mode encodes (proven against a live pool):
+   * - `PASSWORD` is MANDATORY in `AllowedFirstAuthFactors`; Cognito rejects a list
+   *   without it. So the pool allows `[PASSWORD, EMAIL_OTP]` and the CONSUMER's UI
+   *   must never offer the password path (always `InitiateAuth(USER_AUTH,
+   *   PREFERRED_CHALLENGE=EMAIL_OTP)`). To keep the password unreachable through the
+   *   app client too, this mode also drops the `userSrp` auth flow and enables the
+   *   `user` (choice-based `ALLOW_USER_AUTH`) flow on the app clients.
+   * - `EMAIL_OTP` as a first factor is INCOMPATIBLE with `MfaConfiguration: ON`, so
+   *   this mode forces `mfa: OFF`. NOTE: the `OFF -> ON` transition is irreversible
+   *   via the API, so a pool created with this mode cannot later gain MFA in place.
+   *
+   * Mutually exclusive with {@link emailOtpMfa} (email is a first factor here, a
+   * second factor there). @default false
+   */
+  readonly passwordlessEmailOtp?: boolean;
+  /**
    * Custom Email Sender Lambda. When set (together with {@link customSenderKmsKey}),
    * it is wired to the pool via the `CUSTOM_EMAIL_SENDER` trigger and Cognito
    * delivers all customer emails (MFA codes, verification, temporary passwords)
@@ -219,6 +242,22 @@ export class CognitoCustomerPool extends constructs.Construct {
       );
     }
 
+    if (props.passwordlessEmailOtp && props.emailOtpMfa) {
+      throw new Error(
+        'CognitoCustomerPool: passwordlessEmailOtp and emailOtpMfa are mutually exclusive — '
+        + 'passwordless uses EMAIL_OTP as a FIRST auth factor (MFA off), while emailOtpMfa uses it '
+        + 'as a SECOND factor (MFA on). Choose one.',
+      );
+    }
+
+    if (props.passwordlessEmailOtp && (!props.customEmailSenderLambda || !props.emailConfiguration)) {
+      throw new Error(
+        'CognitoCustomerPool: passwordlessEmailOtp requires customEmailSenderLambda, customSenderKmsKey '
+        + 'and emailConfiguration — the first-factor EMAIL_OTP code is delivered by the custom email '
+        + 'sender, and Cognito requires the same DEVELOPER SES EmailConfiguration enablement precondition.',
+      );
+    }
+
     // With emailOtpMfa, EMAIL_OTP is the sole factor and is applied via an L1
     // override below; do NOT pass mfaSecondFactor.email to the L2 (its validateEmailMfa
     // demands a `email` UserPoolEmail be set, which we supply separately via
@@ -236,12 +275,20 @@ export class CognitoCustomerPool extends constructs.Construct {
       ? cognito.AccountRecovery.NONE
       : cognito.AccountRecovery.EMAIL_ONLY;
 
+    // Passwordless uses EMAIL_OTP as a FIRST auth factor, which Cognito forbids while
+    // MFA is ON ("Only PASSWORD and WEB_AUTHN can be enabled as an auth factor if MFA
+    // is enabled"). So passwordless forces MFA OFF. NB: the OFF->ON transition is
+    // irreversible via the API — a pool created passwordless cannot later gain MFA in place.
+    const mfaConfig = props.passwordlessEmailOtp
+      ? cognito.Mfa.OFF
+      : (props.mfa ?? cognito.Mfa.REQUIRED);
+
     this.userPool = new cognito.UserPool(this, 'UserPool', {
       userPoolName: props.userPoolName,
       selfSignUpEnabled: props.selfSignUpEnabled ?? false,
       signInAliases: { email: true },
       signInCaseSensitive: false,
-      mfa: props.mfa ?? cognito.Mfa.REQUIRED,
+      mfa: mfaConfig,
       mfaSecondFactor: l2MfaSecondFactor,
       passwordPolicy: props.passwordPolicy ?? {
         minLength: 12,
@@ -291,6 +338,18 @@ export class CognitoCustomerPool extends constructs.Construct {
       cfnPool.enabledMfas = ['EMAIL_OTP'];
     }
 
+    if (props.passwordlessEmailOtp) {
+      // Choice-based sign-in: EMAIL_OTP as a first auth factor. PASSWORD is MANDATORY
+      // in AllowedFirstAuthFactors (Cognito rejects a list without it), so it stays —
+      // but the app client below drops the password (userSrp) flow and the consumer's
+      // UI never offers it, so the password path is unreachable through this client.
+      const cfnPool = this.userPool.node.defaultChild as cognito.CfnUserPool;
+      cfnPool.policies = {
+        ...(cfnPool.policies as cognito.CfnUserPool.PoliciesProperty | undefined),
+        signInPolicy: { allowedFirstAuthFactors: ['PASSWORD', 'EMAIL_OTP'] },
+      };
+    }
+
     const preTokenLambda = props.preTokenGenerationLambda ?? new lambda.Function(this, 'PreTokenLambda', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
@@ -323,11 +382,20 @@ export class CognitoCustomerPool extends constructs.Construct {
       const client = new cognito.UserPoolClient(this, `Client${spec.key}`, {
         userPool: this.userPool,
         generateSecret: spec.generateSecret ?? false,
-        authFlows: {
-          userSrp: true,
-          custom: props.enableCustomAuthFlow ?? false,
-          // userPassword / adminUserPassword intentionally omitted (disabled).
-        },
+        authFlows: props.passwordlessEmailOtp
+          ? {
+            // Passwordless: enable choice-based ALLOW_USER_AUTH and DROP userSrp so the
+            // password challenge cannot be initiated through this client — even by a
+            // direct API call. PASSWORD stays a pool factor (Cognito's rule) but is
+            // unreachable via the storefront client.
+            user: true,
+            custom: props.enableCustomAuthFlow ?? false,
+          }
+          : {
+            userSrp: true,
+            custom: props.enableCustomAuthFlow ?? false,
+            // userPassword / adminUserPassword intentionally omitted (disabled).
+          },
         oAuth: {
           flows: { authorizationCodeGrant: true },
           scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
