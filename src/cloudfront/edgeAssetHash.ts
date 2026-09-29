@@ -1,20 +1,21 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 /**
  * Compute a deterministic content hash for a Lambda@Edge asset bundle.
  *
  * Why this exists: `cloudfront.experimental.EdgeFunction` publishes a new
- * `AWS::Lambda::Version` whenever the asset hash changes. When the asset is
- * created via `lambda.Code.fromAsset(dir, { bundling })` WITHOUT an explicit
- * `assetHash`, CDK falls back to hashing the bundling OUTPUT — and the local
- * bundler here copies files with `fs.cpSync`, which does not reproduce a
- * byte-identical tree across synths (mtimes/ordering drift). The result is a
- * fresh edge-Lambda version on EVERY deploy even when the code is unchanged,
- * each of which forces a global CloudFront re-association + propagation and
- * locks the prior version from deletion (it also slowly fills the regional
- * Lambda storage quota).
+ * `AWS::Lambda::Version` whenever the asset hash changes. Passing a stable
+ * `assetHash` with `assetHashType: AssetHashType.CUSTOM` pins the SOURCE
+ * identity so unchanged inputs yield an unchanged hash and no new version.
+ *
+ * NOTE: a CUSTOM assetHash alone is not sufficient for determinism — CDK also
+ * folds `JSON.stringify(bundling)` into the final hash (see aws-cdk-lib
+ * `AssetStaging.calculateHash`), so any non-deterministic value inside the
+ * `bundling` options (e.g. a random `volumes[].hostPath`) still churns the
+ * hash. See {@link deterministicConfigDir}, which keeps that path stable.
  *
  * This helper produces a hash from the actual INPUTS — the source directory
  * contents, the generated config, and the optional pre-bundled deps directory —
@@ -40,6 +41,37 @@ export function computeEdgeAssetHash(
   }
 
   return hash.digest('hex');
+}
+
+/**
+ * Create a DETERMINISTIC temp directory holding the generated `config_generated.py`,
+ * and return its path. Used as the `hostPath` of the Docker-fallback bundling
+ * volume for a Lambda@Edge function.
+ *
+ * Why this must be deterministic: CDK derives an asset's final hash even under
+ * `assetHashType: CUSTOM` by folding `JSON.stringify(bundling)` into the custom
+ * hash (see aws-cdk-lib `AssetStaging.calculateHash`). `bundling.volumes[].hostPath`
+ * is therefore part of the hash. A random `fs.mkdtempSync(...)` path changes on
+ * every synth, so the asset hash — and thus the published S3 key — changes every
+ * synth for byte-identical code, publishing a fresh `AWS::Lambda::Version` and
+ * forcing a global CloudFront distribution update on EVERY deploy (and orphaning
+ * the prior replicated edge version, which cannot be deleted for hours).
+ *
+ * Keying the directory on `key` (a per-function id) plus the config content keeps
+ * it stable for unchanged inputs while staying unique per function.
+ */
+export function deterministicConfigDir(key: string, configPy: string): string {
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${key}\0`)
+    .update(configPy)
+    .digest('hex')
+    .slice(0, 16);
+  const dir = path.join(os.tmpdir(), `raindancers-edge-config-${digest}`);
+  fs.mkdirSync(dir, { recursive: true });
+  const configPyPath = path.join(dir, 'config_generated.py');
+  fs.writeFileSync(configPyPath, configPy);
+  return configPyPath;
 }
 
 /**
