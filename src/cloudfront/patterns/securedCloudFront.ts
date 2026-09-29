@@ -1,6 +1,5 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import * as core from 'aws-cdk-lib';
 import {
@@ -15,6 +14,7 @@ import {
 import * as constructs from 'constructs';
 import { AuthSecurityTable } from '../authSecurityTable';
 import { FunctionComposer, minifyFunctionCode } from '../cloudfront-functions/function-composer';
+import { deterministicConfigDir } from '../edgeAssetHash';
 
 /**
  * Compute a deterministic hash for a Lambda asset bundle based on source
@@ -262,9 +262,10 @@ def get_config():
         raise
 `;
 
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edge-auth-'));
-    const configPyPath = path.join(tempDir, 'config_generated.py');
-    fs.writeFileSync(configPyPath, configPyContent);
+    // Deterministic path for the Docker-fallback config volume — a random temp
+    // dir here would churn the CUSTOM asset hash on every synth. See
+    // deterministicConfigDir for the full explanation.
+    const configPyPath = deterministicConfigDir('edge-auth', configPyContent);
 
     const oauthCallbackFunction = new cloudfront.experimental.EdgeFunction(this, 'OAuthCallback', {
       runtime: lambda.Runtime.PYTHON_3_11,

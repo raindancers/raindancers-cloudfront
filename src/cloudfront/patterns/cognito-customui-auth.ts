@@ -1,5 +1,4 @@
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import * as core from 'aws-cdk-lib';
 import {
@@ -13,7 +12,7 @@ import {
 import * as constructs from 'constructs';
 import { Extension, ExtensionConfig, AddBehaviorOptions, RoleMatchMode } from './securedCloudFront';
 import { FunctionComposer } from '../cloudfront-functions/function-composer';
-import { computeEdgeAssetHash } from '../edgeAssetHash';
+import { computeEdgeAssetHash, deterministicConfigDir } from '../edgeAssetHash';
 
 /**
  * Props for {@link CognitoCustomUiAuth}.
@@ -572,9 +571,10 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
   ): cloudfront.experimental.EdgeFunction {
     const sourceDir = path.join(__dirname, '../lambda', sourceDirName);
     const bundledDepsDir = bundledDepsName ? path.join(__dirname, '../lambda-bundled', bundledDepsName) : undefined;
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'customui-auth-'));
-    const configPyPath = path.join(tempDir, 'config_generated.py');
-    fs.writeFileSync(configPyPath, configPy);
+    // Deterministic path for the Docker-fallback config volume — a random temp
+    // dir here would churn the CUSTOM asset hash on every synth. See
+    // deterministicConfigDir for the full explanation.
+    const configPyPath = deterministicConfigDir(id, configPy);
 
     return new cloudfront.experimental.EdgeFunction(this, id, {
       runtime: lambda.Runtime.PYTHON_3_11,

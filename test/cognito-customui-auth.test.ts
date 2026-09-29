@@ -428,3 +428,25 @@ describe('CognitoCustomUiAuth edge config generation', () => {
     }
   });
 });
+
+describe('CognitoCustomUiAuth asset determinism (regression: CloudFront churn)', () => {
+  // Collect the S3Key of every session Lambda@Edge function in a synthesised
+  // template. These are the assets that used to churn: a random mkdtemp path in
+  // bundling.volumes[].hostPath was folded into the CUSTOM asset hash by CDK, so
+  // the S3 key changed on every synth for byte-identical code, publishing a fresh
+  // Lambda@Edge version and forcing a CloudFront distribution update every deploy.
+  const edgeFnS3Keys = (template: Template): string[] => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    return Object.values(fns)
+      .map((r: any) => r.Properties?.Code?.S3Key)
+      .filter((k: unknown): k is string => typeof k === 'string')
+      .sort();
+  };
+
+  test('two synths of identical config produce identical edge-function asset hashes', () => {
+    const a = edgeFnS3Keys(synth());
+    const b = edgeFnS3Keys(synth());
+    expect(a.length).toBeGreaterThan(0);
+    expect(b).toEqual(a);
+  });
+});
