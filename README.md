@@ -100,11 +100,11 @@ There's a scaling argument here too. ZTNA overlay products funnel your traffic t
 
 The tools are there. CloudFront Functions, Lambda@Edge, WAF, KVS on AWS. Workers, KV, WAF on Cloudflare. Front Door, Rules Engine, Functions on Azure. The concept is the same — programmable edge compute enforcing identity and policy before traffic reaches your origin.
 
-## Proof of Concept
+## From Proof of Concept to Production
 
 This repository ([`raindancers-cloudfront`](https://github.com/raindancers/raindancers-cloudfront)) is a CDK construct library published on npm that implements this pattern for AWS. It wires up CloudFront, Lambda@Edge, CloudFront Functions, WAF, KVS, and supports both Cognito and Entra ID authentication flows.
 
-I want to be upfront — this is a proof of concept, not a battle-hardened production library. It needs more work, more testing, and more eyes on it. But it does enough to prove that the concept works end to end. You can stand up a CloudFront distribution with full OAuth 2.0 auth, session management, real-time revocation, and WAF protection using a handful of CDK constructs.
+It began as a proof of concept, and I want to be upfront about where it is now. It has since matured into real use: it sits behind multiple production workloads, mine and other people's who have picked it up and run it. The concept is proven end to end, you can stand up a CloudFront distribution with full OAuth 2.0 auth, session management, real-time revocation, and WAF protection using a handful of CDK constructs. As with anything that touches identity and the edge, I'd still welcome more eyes on it, more testing, and more battle scars.
 
 If the idea interests you, take a look, pull it apart, tell me what's broken. That's how it gets better.
 
