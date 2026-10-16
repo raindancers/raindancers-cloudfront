@@ -1,0 +1,7 @@
+# SCIM provisioning handler dependencies.
+# boto3 is provided by the Lambda runtime and is NOT pinned here.
+# PyJWT + cryptography are used for JWS framing and RS256 signature VERIFICATION;
+# access-token SIGNING is delegated to KMS (kms:Sign), so the private key never
+# leaves KMS. cryptography is the public-key backend PyJWT uses for RS256 verify.
+PyJWT==2.10.1
+cryptography==46.0.5

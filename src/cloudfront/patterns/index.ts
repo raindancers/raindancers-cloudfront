@@ -6,3 +6,4 @@ export * from './cognitoCustomerPool';
 export * from './cognitoSessionBackend';
 export * from './cognito-customui-auth';
 export * from './viewer-mtls-access';
+export * from './scimProvisioningService';
