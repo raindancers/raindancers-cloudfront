@@ -93,6 +93,13 @@ def _list_response(resources):
 # match-before-create). Anything else is a 400 invalidFilter, by design.
 _FILTER_RE = re.compile(r'^\s*(userName|externalId)\s+eq\s+"([^"]*)"\s*$', re.IGNORECASE)
 
+# Entra matches a group before creating it with a displayName eq filter; it may
+# also match by externalId. Groups are keyed by id (externalId), with no
+# displayName index, so a displayName match returns an empty list on purpose:
+# Entra then POSTs the group (create), tracking it by id thereafter. externalId
+# eq is a real point lookup. Anything else is a 400 invalidFilter.
+_GROUP_FILTER_RE = re.compile(r'^\s*(displayName|externalId)\s+eq\s+"([^"]*)"\s*$', re.IGNORECASE)
+
 
 def _users_collection(method, event):
     if method == 'POST':
@@ -202,6 +209,23 @@ def _groups_collection(method, event):
             if m.get('value'):
                 store.add_member(group_id, m['value'])
         return _resp(201, _group_resource(store.get_group(group_id)))
+
+    if method == 'GET':
+        qp = _query_params(event)
+        flt = qp.get('filter')
+        if not flt:
+            # Unbounded list is not part of the provisioning subset we support.
+            return _resp(400, scim_error(400, 'a filter is required', 'invalidFilter'))
+        m = _GROUP_FILTER_RE.match(flt)
+        if not m:
+            return _resp(400, scim_error(400, 'only displayName eq / externalId eq is supported', 'invalidFilter'))
+        attr, value = m.group(1).lower(), m.group(2)
+        # externalId is the group key, so it is a real lookup; displayName has no
+        # index, so it returns an empty match and Entra proceeds to create.
+        item = store.get_group(value) if attr == 'externalid' else None
+        resources = [_group_resource(item)] if item else []
+        return _resp(200, _list_response(resources))
+
     return _resp(405, scim_error(405, 'method not allowed'))
 
 

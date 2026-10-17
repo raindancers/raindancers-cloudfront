@@ -303,6 +303,30 @@ class TestScimLifecycle(HandlerTestBase):
         hot = self.store.get_user_by_external_id('ext-4')
         self.assertIn('grp-1', hot.get('groupIds', set()))
 
+    def test_group_filter_match_before_create(self):
+        # Entra matches a group before creating it. displayName has no index, so
+        # a displayName eq filter returns an empty list (Entra then POSTs/creates)
+        # rather than 405. externalId eq is a real point lookup.
+        self.index.handler(self._event(
+            'POST', '/scim/v2/Groups', headers=self._auth(),
+            body={'externalId': 'grp-9', 'displayName': 'Platform'}), None)
+        # displayName eq -> 200 with an empty match (not 405)
+        by_name = self.index.handler(self._event(
+            'GET', '/scim/v2/Groups', headers=self._auth(),
+            query={'filter': 'displayName eq "Platform"'}), None)
+        self.assertEqual(by_name['statusCode'], 200)
+        self.assertEqual(json.loads(by_name['body'])['totalResults'], 0)
+        # externalId eq -> real lookup, finds the group
+        by_id = self.index.handler(self._event(
+            'GET', '/scim/v2/Groups', headers=self._auth(),
+            query={'filter': 'externalId eq "grp-9"'}), None)
+        self.assertEqual(json.loads(by_id['body'])['totalResults'], 1)
+        # unsupported filter attr -> 400, not 405
+        bad = self.index.handler(self._event(
+            'GET', '/scim/v2/Groups', headers=self._auth(),
+            query={'filter': 'members eq "x"'}), None)
+        self.assertEqual(bad['statusCode'], 400)
+
     def test_discovery_documents(self):
         for route in ('/scim/v2/ServiceProviderConfig', '/scim/v2/Schemas', '/scim/v2/ResourceTypes'):
             r = self.index.handler(self._event('GET', route, headers=self._auth()), None)
