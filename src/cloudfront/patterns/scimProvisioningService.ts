@@ -182,7 +182,20 @@ export class ScimProvisioningService extends constructs.Construct {
     const fn = new lambda.Function(this, 'Handler', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/scim-provisioning')),
+      // The handler imports PyJWT + cryptography (RS256 verification). A plain
+      // fromAsset ships only the .py source, so the deployed Lambda dies at
+      // `import jwt`. Bundle the requirements into the asset: pip install the
+      // deps, then copy the source over them. Mirrors the Docker bundling the
+      // sibling cognito-secured-cloudfront construct uses.
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/scim-provisioning'), {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+          command: [
+            'bash', '-c',
+            'pip install -r requirements.txt -t /asset-output && cp -r . /asset-output',
+          ],
+        },
+      }),
       timeout: props.timeout ?? core.Duration.seconds(30),
       logRetention: props.logRetention ?? logs.RetentionDays.ONE_MONTH,
       environment: {
