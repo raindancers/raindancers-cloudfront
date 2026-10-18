@@ -134,10 +134,43 @@ def set_group_display_name(group_id, display_name):
     )
 
 
+def _members_of_group(group_id):
+    """Every user item whose denormalised groupIds set carries group_id.
+
+    Membership is denormalised onto the user (there is no group->member index),
+    so finding the members of a group needs a scan. This is only ever called on
+    a group DELETE, which is a rare administrative event, not a hot path, and
+    the table is a directory mirror bounded by directory size, not by traffic.
+    """
+    table = _table()
+    members = []
+    kwargs = {
+        'FilterExpression': 'contains(groupIds, :g) AND begins_with(pk, :u)',
+        'ExpressionAttributeValues': {':g': group_id, ':u': 'USER#'},
+    }
+    while True:
+        resp = table.scan(**kwargs)
+        members.extend(resp.get('Items', []))
+        lek = resp.get('LastEvaluatedKey')
+        if not lek:
+            break
+        kwargs['ExclusiveStartKey'] = lek
+    return members
+
+
 def delete_group(group_id):
     item = get_group(group_id)
     if not item:
         return False
+    # Fan the removal out to every member first, so a deleted group leaves no
+    # dangling id in any user's denormalised groupIds set, then delete the
+    # group item itself.
+    for member in _members_of_group(group_id):
+        _table().update_item(
+            Key={'pk': member['pk'], 'sk': member['sk']},
+            UpdateExpression='DELETE groupIds :g SET updatedAt = :u',
+            ExpressionAttributeValues={':g': {group_id}, ':u': _now_iso()},
+        )
     _table().delete_item(Key={'pk': item['pk'], 'sk': item['sk']})
     return True
 
