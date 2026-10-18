@@ -57,6 +57,22 @@ class FakeTable:
         hits = [dict(v) for v in self.items.values() if v.get(attr) == target]
         return {'Items': hits[:Limit] if Limit else hits}
 
+    def scan(self, FilterExpression=None, ExpressionAttributeValues=None,
+             ExclusiveStartKey=None, **kw):
+        # Supports only the delete_group fan-out filter:
+        #   contains(groupIds, :g) AND begins_with(pk, :u)
+        vals = ExpressionAttributeValues or {}
+        g = vals.get(':g')
+        pfx = vals.get(':u', '')
+        hits = []
+        for v in self.items.values():
+            if not v.get('pk', '').startswith(pfx):
+                continue
+            if g is not None and g not in v.get('groupIds', set()):
+                continue
+            hits.append(dict(v))
+        return {'Items': hits}
+
     def update_item(self, Key, UpdateExpression, ExpressionAttributeValues, **kw):
         it = self.items[(Key['pk'], Key['sk'])]
         vals = ExpressionAttributeValues
@@ -326,6 +342,35 @@ class TestScimLifecycle(HandlerTestBase):
             'GET', '/scim/v2/Groups', headers=self._auth(),
             query={'filter': 'members eq "x"'}), None)
         self.assertEqual(bad['statusCode'], 400)
+
+    def test_group_delete_fans_removal_out_to_members(self):
+        # A group delete must strip the group id from every member's
+        # denormalised groupIds set, leaving no dangling reference to a group
+        # that no longer exists.
+        u = self.index.handler(self._event(
+            'POST', '/scim/v2/Users', headers=self._auth(),
+            body={'externalId': 'ext-del', 'userName': 'e@x.io'}), None)
+        scim_id = json.loads(u['body'])['id']
+        self.index.handler(self._event(
+            'POST', '/scim/v2/Groups', headers=self._auth(),
+            body={'externalId': 'grp-del', 'displayName': 'Doomed'}), None)
+        self.index.handler(self._event(
+            'PATCH', '/scim/v2/Groups/grp-del', headers=self._auth(),
+            body={'Operations': [{'op': 'add', 'path': 'members',
+                                  'value': [{'value': scim_id}]}]}), None)
+        # Precondition: the member carries the group id.
+        before = self.store.get_user_by_scim_id(scim_id)
+        self.assertIn('grp-del', before.get('groupIds', set()))
+
+        # Delete the group.
+        deleted = self.index.handler(self._event(
+            'DELETE', '/scim/v2/Groups/grp-del', headers=self._auth()), None)
+        self.assertEqual(deleted['statusCode'], 204)
+
+        # The group item is gone AND the id is stripped from the member.
+        self.assertIsNone(self.store.get_group('grp-del'))
+        after = self.store.get_user_by_scim_id(scim_id)
+        self.assertNotIn('grp-del', after.get('groupIds', set()))
 
     def test_discovery_documents(self):
         for route in ('/scim/v2/ServiceProviderConfig', '/scim/v2/Schemas', '/scim/v2/ResourceTypes'):
