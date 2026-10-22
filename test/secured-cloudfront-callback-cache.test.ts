@@ -89,4 +89,66 @@ describe('SecuredCloudFront OAuth callback caching', () => {
       expect(cfg?.MaxTTL).not.toBe(1);
     }
   });
+
+  /**
+   * Regression for the RS256 web-identity key-region bug.
+   *
+   * The mint's generated `config_generated.py` embeds WEB_IDENTITY_KEY_REGION so
+   * the Lambda@Edge targets the right region for kms:Sign. An earlier version
+   * sourced it from `ssm.StringParameter.valueForStringParameter(...)`, whose
+   * value is a DEPLOY-TIME CDK token — it serialized into the Python source as
+   * the literal `${Token[...]}`, so the deployed mint did
+   * `boto3.client('kms', region_name='${Token[...]}')` and threw at init, which
+   * CloudFront surfaced as HTTP 500 "Configuration error" (no Lambda log — it
+   * failed before the handler ran). It must be a CONCRETE string: `authRegion`,
+   * the region the asymmetric key is created in.
+   */
+  test('generated mint config embeds a concrete WEB_IDENTITY_KEY_REGION, not a CDK token', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'WiStack', {
+      env: { account: '111111111111', region: 'us-east-1' },
+    });
+    const certificate = acm.Certificate.fromCertificateArn(
+      stack,
+      'Cert',
+      'arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-0000-0000-000000000000',
+    );
+    new SecuredCloudFront(stack, 'Secured', {
+      defaultBehavior: { origin: new origins.HttpOrigin('origin.example.com') },
+      domainNames: ['payload.example.com'],
+      certificate: certificate,
+      authSsmParamPrefix: '/auth/test',
+      authRegion: 'ap-southeast-2',
+      enableUserInfoInjection: false,
+      enableWebIdentityToken: true,
+      webIdentityIssuer: 'https://payload.example.com',
+    });
+
+    const assembly = app.synth();
+    const configs: string[] = [];
+    const walk = (dir: string): void => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name === 'config_generated.py') configs.push(p);
+      }
+    };
+    walk(assembly.directory);
+    expect(configs.length).toBeGreaterThan(0);
+
+    const withWebIdentity = configs
+      .map((f) => fs.readFileSync(f, 'utf8'))
+      .filter((c) => c.includes('WEB_IDENTITY_KEY_REGION'));
+    expect(withWebIdentity.length).toBeGreaterThan(0);
+
+    for (const content of withWebIdentity) {
+      const line = content
+        .split('\n')
+        .find((l) => l.startsWith('WEB_IDENTITY_KEY_REGION'));
+      expect(line).toBe("WEB_IDENTITY_KEY_REGION = 'ap-southeast-2'");
+      // The whole file must carry no unresolved CDK token.
+      expect(content).not.toContain('${Token');
+      expect(content).not.toContain('Token[');
+    }
+  });
 });
