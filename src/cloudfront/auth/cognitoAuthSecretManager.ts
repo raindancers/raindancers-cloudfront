@@ -7,6 +7,7 @@ import {
   RemovalPolicy,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
+import type { ScopeResolverConfig } from '../patterns/cognitoSessionBackend';
 
 export interface CognitoAuthSecretManagerProps {
   readonly domainName: string;
@@ -21,6 +22,10 @@ export interface CognitoAuthSecretManagerProps {
   readonly securityAlertsTopicArn?: string;
   readonly autoRevokeOnReuse?: boolean;
   readonly jwtClaimsWhitelist?: string[];
+  /** Opt-in scope resolver config written into the config secret (see {@link ScopeResolverConfig}). */
+  readonly scopeResolver?: ScopeResolverConfig;
+  /** Ceiling (bytes) on the assembled session token. @default 7168 */
+  readonly scopeTokenMaxBytes?: number;
   /**
    * Removal policy for the auth-secret KMS key.
    * @default RemovalPolicy.RETAIN_ON_UPDATE_OR_DELETE
@@ -61,6 +66,18 @@ export class CognitoAuthSecretManager extends constructs.Construct {
       'sub', 'email', 'name', 'cognito:groups', 'roles',
     ];
 
+    // Resolver keys are injected ONLY when a resolver is configured, so a
+    // backend without `scopeResolver` emits the exact same config secret as the
+    // current release (Requirement 1 — byte-for-byte backward compatibility).
+    const resolverKeys = props.scopeResolver
+      ? {
+        scope_resolver_url: props.scopeResolver.endpointUrl,
+        scope_resolver_secret_arn: props.scopeResolver.sharedSecretArn ?? '',
+        scope_resolver_timeout: String(props.scopeResolver.timeoutSeconds ?? 3),
+        scope_token_max_bytes: String(props.scopeTokenMaxBytes ?? 7168),
+      }
+      : {};
+
     this.configSecret = new secretsmanager.Secret(this, 'ConfigSecret', {
       secretName: props.configSecretName ?? `cloudfront-auth-config-${props.domainName}`,
       encryptionKey: this.kmsKey,
@@ -78,6 +95,7 @@ export class CognitoAuthSecretManager extends constructs.Construct {
           auto_revoke_on_reuse: props.autoRevokeOnReuse ? 'true' : 'false',
           jwt_claims_whitelist: JSON.stringify(jwtClaimsWhitelist),
           allowed_domains: JSON.stringify([props.domainName]),
+          ...resolverKeys,
         }),
         generateStringKey: 'hmac_key',
         excludePunctuation: true,

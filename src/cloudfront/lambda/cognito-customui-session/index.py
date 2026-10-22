@@ -41,6 +41,7 @@ secretsmanager = None
 CONFIG = None
 HMAC_SECRET = None
 HOOK_SECRET = None
+SCOPE_SECRET = None
 JWKS_CACHE = None
 
 
@@ -76,6 +77,25 @@ def get_hook_secret():
     resp = secretsmanager.get_secret_value(SecretId=arn)
     HOOK_SECRET = resp.get('SecretString', '')
     return HOOK_SECRET
+
+
+def get_scope_resolver_secret():
+    """Fetch the scope-resolver shared bearer secret from Secrets Manager (cached).
+
+    Mirrors get_hook_secret: an absent ARN yields '' (no Authorization header),
+    not an error.
+    """
+    global SCOPE_SECRET
+    if SCOPE_SECRET is not None:
+        return SCOPE_SECRET
+    config = get_config_cached()
+    arn = config.get('scope_resolver_secret_arn', '')
+    if not arn:
+        SCOPE_SECRET = ''
+        return SCOPE_SECRET
+    resp = secretsmanager.get_secret_value(SecretId=arn)
+    SCOPE_SECRET = resp.get('SecretString', '')
+    return SCOPE_SECRET
 
 
 def base64url_encode(data):
@@ -153,6 +173,31 @@ def call_identity_hook(hook_url, identity):
     req = urllib.request.Request(hook_url, data=data, headers=headers, method='POST')
     try:
         with urllib.request.urlopen(req, timeout=3) as response:
+            return response.getcode(), json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        body = {}
+        try:
+            body = json.loads(e.read().decode('utf-8'))
+        except Exception:
+            pass
+        return e.code, body
+
+
+def call_scope_resolver(url, secret, identity, timeout):
+    """POST the verified identity to the consumer's scope resolver.
+
+    Returns (status_code, body_dict). Shape and failure handling mirror
+    call_identity_hook: an HTTPError returns its code + parsed body (or {} if
+    unparseable). Any other transport error (timeout, connection reset) raises,
+    which the caller treats as a fail-closed signal (no session issued).
+    """
+    data = json.dumps(identity, separators=(',', ':')).encode('utf-8')
+    headers = {'Content-Type': 'application/json'}
+    if secret:
+        headers['Authorization'] = f'Bearer {secret}'
+    req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.getcode(), json.loads(response.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         body = {}
@@ -277,9 +322,60 @@ def lambda_handler(event, context):
     if claims.get('cognito:groups'):
         session_payload['roles'] = claims['cognito:groups']
 
+    # 3b. Scope Resolver (opt-in). When configured, POST the verified identity
+    # to the consumer's resolver and merge the returned role claims and scope
+    # principal tags into the session payload, gated by jwt_claims_whitelist.
+    # Absent `scope_resolver_url` => no call, no new claims: mint is unchanged.
+    resolver_url = config.get('scope_resolver_url', '')
+    if resolver_url:
+        try:
+            status, result = call_scope_resolver(
+                resolver_url, get_scope_resolver_secret(),
+                {'sub': sub, 'email': email, 'provider': 'cognito'},
+                int(config.get('scope_resolver_timeout', '3')),
+            )
+        except Exception as e:
+            # Timeout / connection error => fail closed, no session.
+            logger.error(f'Scope resolver call failed: {e}')
+            return _json_response(503, {'error': 'scope_unavailable'})
+
+        # Fail closed on any non-2xx status or a non-dict (malformed) body.
+        if status < 200 or status >= 300 or not isinstance(result, dict):
+            logger.error(f'Scope resolver returned status={status}')
+            return _json_response(503, {'error': 'scope_unavailable'})
+
+        whitelist = set(json.loads(config.get('jwt_claims_whitelist', '[]')))
+
+        # (a) Role claims — merged only if whitelisted; a dropped key never
+        # fails the mint.
+        for key, value in (result.get('claims') or {}).items():
+            if key in whitelist:
+                session_payload[key] = value
+
+        # (b) Scope principal tags — merged into the pre-token tag claim in the
+        # same `:k=v:` shape the pre-token injector emits, gated by the same
+        # whitelist entry for the principal-tags claim key.
+        tags = result.get('principal_tags') or {}
+        tag_claim = 'https://aws.amazon.com/tags/principal_tags/Claims'
+        if tags and tag_claim in whitelist:
+            session_payload[tag_claim] = ':' + ':'.join(
+                f'{name}={val}' for name, val in tags.items()
+            ) + ':'
+
     hmac_secret = get_hmac_secret()
     header_b64 = base64url_encode(json.dumps({'alg': 'HS256', 'typ': 'JWT'}, separators=(',', ':')).encode())
     payload_b64 = base64url_encode(json.dumps(session_payload, separators=(',', ':')).encode())
+
+    # 3c. Size guard — refuse (never truncate) an over-budget token. The check
+    # runs on the ASSEMBLED token (header + payload + a 43-byte base64url HS256
+    # signature segment, plus the two '.' separators) BEFORE the cookie is
+    # built, so a partial set of role claims / scope tags can never be signed.
+    max_bytes = int(config.get('scope_token_max_bytes', '7168'))
+    assembled_len = len(header_b64) + 1 + len(payload_b64) + 1 + 43
+    if assembled_len > max_bytes:
+        logger.error(f'Assembled session token is {assembled_len} bytes, over {max_bytes}; refusing mint')
+        return _json_response(500, {'error': 'scope_token_too_large'})
+
     signing_input = f'{header_b64}.{payload_b64}'
     sig = hmac.new(hmac_secret.encode(), signing_input.encode(), hashlib.sha256).digest()
     cookie_value = f'{signing_input}.{base64url_encode(sig)}'

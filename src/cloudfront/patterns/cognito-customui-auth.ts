@@ -104,6 +104,15 @@ export interface CognitoCustomUiAuthProps<TRole extends string = string> {
   readonly identityLinkingHookUrl: string;
   /** Secrets Manager ARN of the shared secret used to authenticate to the hook. */
   readonly identityLinkingHookSecretArn?: string;
+  /**
+   * Secrets Manager ARN of the shared bearer secret the Scope Resolver call
+   * authenticates with. When set, the session-issuance Lambda's role is granted
+   * `secretsmanager:GetSecretValue` on it (mirrors
+   * {@link identityLinkingHookSecretArn}). Must match the `sharedSecretArn` on
+   * the backend's {@link ScopeResolverConfig}. Omit when the resolver is
+   * unauthenticated or unconfigured.
+   */
+  readonly scopeResolverSecretArn?: string;
   /** Session JWT lifetime, seconds. @default 3600 */
   readonly sessionTtlSeconds?: number;
   /** Stored refresh-token lifetime, days. @default 30 */
@@ -224,7 +233,10 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
     const configPy = this.renderConfigPy(baseSecretName, extraConfigSecretName, props.authRegion, extraSecretRegion, staticOverrides);
 
     // Shared IAM grants factory for the edge Lambdas.
-    const grantCommon = (role: iam.IRole, opts: { kms: boolean; ddb: boolean; kvs: boolean; cognito: boolean; hookSecret: boolean }): void => {
+    const grantCommon = (
+      role: iam.IRole,
+      opts: { kms: boolean; ddb: boolean; kvs: boolean; cognito: boolean; hookSecret: boolean; resolverSecret?: boolean },
+    ): void => {
       role.addToPrincipalPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
@@ -235,6 +247,13 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
           effect: iam.Effect.ALLOW,
           actions: ['secretsmanager:GetSecretValue'],
           resources: [props.identityLinkingHookSecretArn],
+        }));
+      }
+      if (opts.resolverSecret && props.scopeResolverSecretArn) {
+        role.addToPrincipalPolicy(new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [props.scopeResolverSecretArn],
         }));
       }
       if (opts.kms) {
@@ -282,7 +301,7 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
     // fat PyJWT/cryptography cognito-auth bundle) so it fits the 1 MB viewer-request
     // Lambda@Edge code limit.
     const issuanceRole = edgeRole('IssuanceRole');
-    grantCommon(issuanceRole, { kms: true, ddb: true, kvs: false, cognito: false, hookSecret: true });
+    grantCommon(issuanceRole, { kms: true, ddb: true, kvs: false, cognito: false, hookSecret: true, resolverSecret: true });
     const issuanceFn = this.makeEdgeFunction('SessionIssuance', 'cognito-customui-session', configPy, issuanceRole, 'cognito-customui-session');
 
     // Refresh + logout Lambdas (boto3 only — no bundled deps).

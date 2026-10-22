@@ -59,6 +59,73 @@ describe('CognitoSessionBackend', () => {
   });
 });
 
+describe('CognitoSessionBackend — Scope Resolver (opt-in)', () => {
+  // The config secret's SecretStringTemplate is an `Fn::Join` object (one
+  // member is a CFN token for the table name), so serialize the whole thing to
+  // a string and assert on the embedded JSON literal fragments.
+  function configSecretTemplate(template: Template): string {
+    const secrets = template.findResources('AWS::SecretsManager::Secret');
+    const configSecret = Object.values(secrets).find(
+      (r: any) => typeof r.Properties?.Name === 'string'
+        && r.Properties.Name.startsWith('cloudfront-auth-config-'),
+    ) as any;
+    expect(configSecret).toBeDefined();
+    return JSON.stringify(configSecret.Properties.GenerateSecretString.SecretStringTemplate);
+  }
+
+  test('without scopeResolver the config secret carries no resolver keys (R1.3)', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'NoResolverStack', { env: { account: '123456789012', region: 'eu-west-2' } });
+    new CognitoSessionBackend(stack, 'Backend', {
+      domainName: 'shop.example.com',
+      userPoolId: 'eu-west-2_abc123',
+      clientId: 'client-abc',
+      cognitoDomain: 'shop-brand.auth.eu-west-2.amazoncognito.com',
+    });
+    const tpl = configSecretTemplate(Template.fromStack(stack));
+    expect(tpl).not.toContain('scope_resolver_url');
+    expect(tpl).not.toContain('scope_resolver_secret_arn');
+    expect(tpl).not.toContain('scope_token_max_bytes');
+  });
+
+  test('with scopeResolver the config secret carries the resolver url, timeout and size cap (R1.1, R2.1)', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'ResolverStack', { env: { account: '123456789012', region: 'eu-west-2' } });
+    new CognitoSessionBackend(stack, 'Backend', {
+      domainName: 'shop.example.com',
+      userPoolId: 'eu-west-2_abc123',
+      clientId: 'client-abc',
+      cognitoDomain: 'shop-brand.auth.eu-west-2.amazoncognito.com',
+      scopeResolver: {
+        endpointUrl: 'https://resolver.example.com/scope',
+        timeoutSeconds: 5,
+      },
+      scopeTokenMaxBytes: 6000,
+    });
+    const tpl = configSecretTemplate(Template.fromStack(stack));
+    expect(tpl).toContain('\\"scope_resolver_url\\":\\"https://resolver.example.com/scope\\"');
+    expect(tpl).toContain('\\"scope_resolver_timeout\\":\\"5\\"');
+    expect(tpl).toContain('\\"scope_token_max_bytes\\":\\"6000\\"');
+    // No shared secret configured => empty, not absent.
+    expect(tpl).toContain('\\"scope_resolver_secret_arn\\":\\"\\"');
+  });
+
+  test('defaults timeout to 3 and size cap to 7168 when unset (R5.1)', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'ResolverDefaultsStack', { env: { account: '123456789012', region: 'eu-west-2' } });
+    new CognitoSessionBackend(stack, 'Backend', {
+      domainName: 'shop.example.com',
+      userPoolId: 'eu-west-2_abc123',
+      clientId: 'client-abc',
+      cognitoDomain: 'shop-brand.auth.eu-west-2.amazoncognito.com',
+      scopeResolver: { endpointUrl: 'https://resolver.example.com/scope' },
+    });
+    const tpl = configSecretTemplate(Template.fromStack(stack));
+    expect(tpl).toContain('\\"scope_resolver_timeout\\":\\"3\\"');
+    expect(tpl).toContain('\\"scope_token_max_bytes\\":\\"7168\\"');
+  });
+});
+
 describe('CognitoAuthInfrastructure facade', () => {
   function synth(): Template {
     const app = new core.App();
