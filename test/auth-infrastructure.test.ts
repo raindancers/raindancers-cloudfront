@@ -60,3 +60,68 @@ describe('AuthInfrastructure — scope token size guard (Entra, 0.0.53)', () => 
     expect(tpl).toContain('jwt_claims_whitelist');
   });
 });
+
+describe('AuthInfrastructure — RS256 web-identity half (two-token model)', () => {
+  function configSecretTemplate(template: Template): string {
+    const secrets = template.findResources('AWS::SecretsManager::Secret');
+    const configSecret = Object.values(secrets).find(
+      (r: any) => typeof r.Properties?.Name === 'string'
+        && r.Properties.Name.startsWith('cloudfront-auth-config-'),
+    ) as any;
+    expect(configSecret).toBeDefined();
+    return JSON.stringify(configSecret.Properties.GenerateSecretString.SecretStringTemplate);
+  }
+
+  function build(stackId: string, extra: Record<string, unknown> = {}) {
+    const app = new core.App();
+    const stack = new core.Stack(app, stackId, { env: { account: '123456789012', region: 'ap-southeast-2' } });
+    const auth = new AuthInfrastructure(stack, 'Auth', {
+      zoneName: 'admin.example.com',
+      tenantId: 'tenant-123',
+      clientId: 'client-abc',
+      oauth2CallbackRoleName: 'oauth2-callback-role',
+      appSpec: { name: 'admin' },
+      ...extra,
+    });
+    return { auth, template: Template.fromStack(stack) };
+  }
+
+  test('OFF by default: no asymmetric key, one OIDC provider, no web-identity config', () => {
+    const { auth, template } = build('WiOffStack');
+    // Only the symmetric secret-encryption key exists (SYMMETRIC_DEFAULT).
+    const keys = template.findResources('AWS::KMS::Key');
+    const asymmetric = Object.values(keys).filter(
+      (r: any) => r.Properties?.KeySpec === 'RSA_2048',
+    );
+    expect(asymmetric).toHaveLength(0);
+    // Exactly one OIDC provider (Entra), no horton-issuer provider.
+    template.resourceCountIs('Custom::AWSCDKOpenIdConnectProvider', 1);
+    expect(auth.webIdentityOidcProviderArn).toBeUndefined();
+    expect(auth.webIdentityKeyArn).toBeUndefined();
+    expect(configSecretTemplate(template)).not.toContain('web_identity_signing_key_id');
+  });
+
+  test('ON: asymmetric RSA_2048 SIGN_VERIFY key, second OIDC provider, config plumbed', () => {
+    const { auth, template } = build('WiOnStack', {
+      enableWebIdentityToken: true,
+      webIdentityIssuer: 'https://admin.example.com',
+    });
+    const keys = template.findResources('AWS::KMS::Key');
+    const asymmetric = Object.values(keys).filter(
+      (r: any) => r.Properties?.KeySpec === 'RSA_2048' && r.Properties?.KeyUsage === 'SIGN_VERIFY',
+    );
+    expect(asymmetric).toHaveLength(1);
+    // Two OIDC providers now: Entra + the horton issuer.
+    template.resourceCountIs('Custom::AWSCDKOpenIdConnectProvider', 2);
+    expect(auth.webIdentityOidcProviderArn).toBeDefined();
+    expect(auth.webIdentityKeyArn).toBeDefined();
+    const tpl = configSecretTemplate(template);
+    expect(tpl).toContain('web_identity_signing_key_id');
+    expect(tpl).toContain('web_identity_issuer');
+  });
+
+  test('ON without an issuer is refused', () => {
+    expect(() => build('WiNoIssuerStack', { enableWebIdentityToken: true }))
+      .toThrow(/webIdentityIssuer/);
+  });
+});

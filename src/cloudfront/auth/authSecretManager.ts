@@ -37,12 +37,36 @@ export interface AuthSecretManagerProps {
    * template is byte-for-byte unchanged for existing consumers.
    */
   readonly scopeTokenMaxBytes?: number;
+  /**
+   * Enable the RS256 **web-identity token** half of the two-token model. When
+   * true, an asymmetric KMS signing key (RSA_2048, SIGN_VERIFY) is created and
+   * the mint ALSO issues a horton-signed RS256 JWT — alongside the HMAC session
+   * cookie — carrying the same principal-tags brand claim, for
+   * `sts:AssumeRoleWithWebIdentity`. The private key never leaves KMS
+   * (`kms:Sign`); the public half is served at {@link jwksPath}. Default OFF, so
+   * existing consumers synthesise no new key and mint no second token.
+   * @default false
+   */
+  readonly enableWebIdentityToken?: boolean;
+  /**
+   * Issuer (`iss`) and audience (`aud`) stamped on the RS256 web-identity token,
+   * and the `url` of the IAM OIDC provider that trusts it. Required when
+   * {@link enableWebIdentityToken} is true. Typically the JWKS-hosting origin,
+   * e.g. `https://admin.example.com`.
+   */
+  readonly webIdentityIssuer?: string;
 }
 
 export class AuthSecretManager extends constructs.Construct {
   public readonly kmsKey: kms.Key;
   public readonly configSecret: secretsmanager.Secret;
   public readonly kvs: cloudfront.KeyValueStore;
+  /**
+   * Asymmetric (RSA_2048 SIGN_VERIFY) KMS key the mint uses to sign the RS256
+   * web-identity token. Only created when `enableWebIdentityToken` is true;
+   * undefined otherwise.
+   */
+  public readonly webIdentityKey?: kms.Key;
 
   constructor(scope: constructs.Construct, id: string, props: AuthSecretManagerProps) {
     super(scope, id);
@@ -69,6 +93,30 @@ export class AuthSecretManager extends constructs.Construct {
       'oid', 'tid', 'sub', 'email', 'name', 'preferred_username', 'groups', 'roles', 'amr',
     ];
 
+    // RS256 web-identity half (opt-in). An asymmetric KMS key whose private
+    // half never leaves KMS; the mint signs the role-assumption token with
+    // kms:Sign and the public half is published as a JWKS. Single regional key
+    // (not multi-Region): the mint already reads its config from a fixed region
+    // and signs once per login, so a cross-region kms:Sign is acceptable and
+    // avoids per-replica key cost + rotation complexity.
+    if (props.enableWebIdentityToken) {
+      if (!props.webIdentityIssuer) {
+        throw new Error(
+          'enableWebIdentityToken requires webIdentityIssuer (the iss/aud for the '
+          + 'RS256 token and the OIDC provider url).',
+        );
+      }
+      this.webIdentityKey = new kms.Key(this, 'WebIdentityKey', {
+        description: 'Asymmetric RS256 signing key for the web-identity token (AssumeRoleWithWebIdentity)',
+        keySpec: kms.KeySpec.RSA_2048,
+        keyUsage: kms.KeyUsage.SIGN_VERIFY,
+        // Asymmetric keys do not support automatic rotation; rotation is a
+        // deliberate new-key + JWKS-overlap operation.
+        enableKeyRotation: false,
+        removalPolicy: RemovalPolicy.RETAIN,
+      });
+    }
+
     const configSecretName = `cloudfront-auth-config-${props.domainName}`;
     const configTemplate: Record<string, string> = {
       azure_tenant_id: props.azureTenantId,
@@ -91,6 +139,14 @@ export class AuthSecretManager extends constructs.Construct {
     // applies and the secret template is byte-for-byte unchanged otherwise.
     if (props.scopeTokenMaxBytes !== undefined) {
       configTemplate.scope_token_max_bytes = String(props.scopeTokenMaxBytes);
+    }
+    // RS256 web-identity half: give the mint the asymmetric key id + issuer so
+    // it can also sign the role-assumption token. Only present when enabled, so
+    // the secret template is byte-for-byte unchanged for existing consumers and
+    // the mint treats the feature as off when the keys are absent.
+    if (props.enableWebIdentityToken && this.webIdentityKey) {
+      configTemplate.web_identity_signing_key_id = this.webIdentityKey.keyId;
+      configTemplate.web_identity_issuer = props.webIdentityIssuer!;
     }
     this.configSecret = new secretsmanager.Secret(this, 'ConfigSecret', {
       secretName: configSecretName,

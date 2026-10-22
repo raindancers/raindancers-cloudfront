@@ -134,6 +134,25 @@ export interface CloudFrontWithAzureAuthSplitProps<TRole extends string = string
   readonly postAuthHookTimeout?: number;
   /** Whether to fail closed (deny auth) if the post-auth hook returns an error or is unavailable. @default true */
   readonly postAuthHookFailClosed?: boolean;
+  /**
+   * Enable the RS256 **web-identity token** half of the two-token model on the
+   * mint. Must match the `enableWebIdentityToken` set on the `AuthInfrastructure`
+   * that published this prefix (the mint signs with the key AuthInfrastructure
+   * created). When true, the edge role is granted `kms:Sign` + `kms:GetPublicKey`
+   * on the web-identity key and the mint's generated config carries the issuer.
+   * @default false
+   */
+  readonly enableWebIdentityToken?: boolean;
+  /**
+   * Issuer (`iss`/`aud`) for the RS256 web-identity token; must match the
+   * `AuthInfrastructure` value. Required when {@link enableWebIdentityToken} is
+   * true.
+   */
+  readonly webIdentityIssuer?: string;
+  /**
+   * Path the JWKS is served at. @default '/.well-known/jwks.json'
+   */
+  readonly jwksPath?: string;
 }
 
 export class SecuredCloudFront<TRole extends string = string> extends constructs.Construct {
@@ -175,6 +194,19 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
     const tenantId = ssm.StringParameter.valueForStringParameter(this, `${p}/tenantId`);
     const clientId = ssm.StringParameter.valueForStringParameter(this, `${p}/clientId`);
     const oauth2CallbackRoleName = ssm.StringParameter.valueForStringParameter(this, `${p}/oauth2CallbackRoleName`);
+
+    // RS256 web-identity half (opt-in, must match AuthInfrastructure). Read the
+    // asymmetric signing-key ARN + its region so the edge role can kms:Sign.
+    const enableWebIdentityToken = props.enableWebIdentityToken ?? false;
+    const webIdentityKeyArn = enableWebIdentityToken
+      ? ssm.StringParameter.valueForStringParameter(this, `${p}/webIdentityKeyArn`)
+      : undefined;
+    const webIdentityKeyRegion = enableWebIdentityToken
+      ? ssm.StringParameter.valueForStringParameter(this, `${p}/webIdentityKeyRegion`)
+      : undefined;
+    if (enableWebIdentityToken && !props.webIdentityIssuer) {
+      throw new Error('enableWebIdentityToken requires webIdentityIssuer (must match the AuthInfrastructure value).');
+    }
 
     this.configSecret = secretsmanager.Secret.fromSecretCompleteArn(this, 'ImportedSecret', configSecretArn);
     this.kmsKey = kms.Key.fromKeyArn(this, 'ImportedKey', kmsKeyArn);
@@ -218,6 +250,17 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
       resources: ['*'],
     }));
 
+    // RS256 web-identity half: let the mint sign the role-assumption token with
+    // the asymmetric key (kms:Sign) and build the JWKS (kms:GetPublicKey). The
+    // private key never leaves KMS. Granted only when the feature is enabled.
+    if (enableWebIdentityToken && webIdentityKeyArn) {
+      this.lambdaEdgeRole.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['kms:Sign', 'kms:GetPublicKey'],
+        resources: [webIdentityKeyArn],
+      }));
+    }
+
     this.lambdaEdgeRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['cloudfront-keyvaluestore:PutKey', 'cloudfront-keyvaluestore:DescribeKeyValueStore'],
@@ -247,6 +290,10 @@ logger = logging.getLogger()
 # The secret name is constructed from the domain name
 CONFIG_SECRET_NAME = '${props.authConfigSecretName ?? `cloudfront-auth-config-${props.domainNames[0]}`}'
 CONFIG_REGION = '${props.authRegion}'
+# RS256 web-identity half: region of the asymmetric KMS signing key, so the
+# mint's kms:Sign targets the right region (Lambda@Edge runs globally; the key
+# is a single regional key). Empty when the feature is off.
+WEB_IDENTITY_KEY_REGION = '${enableWebIdentityToken ? (webIdentityKeyRegion ?? '') : ''}'
 
 def get_config():
     logger.info(f'Attempting to load config from Secrets Manager')
@@ -378,6 +425,23 @@ def get_config():
         // does not need to be part of the cache key.
         cachePolicy: props.additionalBehaviors?.['/oauth2/callback']?.cachePolicy ?? cloudfront.CachePolicy.CACHING_DISABLED,
       };
+
+      // RS256 web-identity half: serve the JWKS from the SAME callback
+      // EdgeFunction (it dispatches the /.well-known/jwks.json path). The public
+      // key is cacheable, so this behavior uses the managed caching-optimized
+      // policy rather than CACHING_DISABLED.
+      if (enableWebIdentityToken) {
+        const jwksPath = props.jwksPath ?? '/.well-known/jwks.json';
+        additionalBehaviors[jwksPath] = {
+          origin: props.defaultBehavior.origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          edgeLambdas: [{
+            functionVersion: oauthCallbackFunction.currentVersion,
+            eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+          }],
+          cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        };
+      }
     }
 
     // Deploy Refresh Lambda when enableRefreshEndpoint is true

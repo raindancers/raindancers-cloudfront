@@ -12,6 +12,16 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from config_generated import get_config
+import web_identity
+
+# RS256 web-identity half: the KMS signing key's region, baked into the
+# generated config by the construct. Older generated configs (feature off) do
+# not define it; default to empty so boto3 uses the ambient region and the
+# feature stays off (is_enabled checks the signing-key id, not this).
+try:
+    from config_generated import WEB_IDENTITY_KEY_REGION
+except ImportError:
+    WEB_IDENTITY_KEY_REGION = ''
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -212,7 +222,26 @@ def validate_jwt_token(id_token, azure_tenant_id, azure_client_id):
 def lambda_handler(event, context):
     """Handle OAuth callback from Azure AD"""
     request = event['Records'][0]['cf']['request']
-    
+
+    # RS256 web-identity half: serve the JWKS (the asymmetric key's public half)
+    # so STS can verify the role-assumption token. This route is independent of
+    # the OAuth callback flow; handle it before anything else. Only active when
+    # the feature is on (signing-key id present in config).
+    uri = request.get('uri', '')
+    if uri.endswith('/.well-known/jwks.json'):
+        try:
+            cfg = get_config_cached()
+        except Exception as e:
+            logger.error(f'JWKS: failed to load configuration: {e}')
+            return {'status': '500', 'statusDescription': 'Internal Server Error', 'body': 'Configuration error'}
+        if not web_identity.is_enabled(cfg):
+            return {'status': '404', 'statusDescription': 'Not Found', 'body': 'Not found'}
+        try:
+            return web_identity.jwks_document(cfg, WEB_IDENTITY_KEY_REGION)
+        except Exception as e:
+            logger.error(f'JWKS: failed to build document: {e}')
+            return {'status': '500', 'statusDescription': 'Internal Server Error', 'body': 'JWKS unavailable'}
+
     # Debug logging for cookies
     logger.info(f'Request headers: {json.dumps(request.get("headers", {}))}')
     
@@ -675,6 +704,40 @@ def lambda_handler(event, context):
             f'Expires={expires_str}'
             f'{domain_attr}'
         )
+
+        # RS256 web-identity half: when enabled, ALSO mint a horton-signed RS256
+        # token for sts:AssumeRoleWithWebIdentity, carrying the SAME principal-tags
+        # brand claim and the SAME expiry as the session cookie (one source, so
+        # the two tokens can never disagree about the brand). Delivered as a
+        # separate __Secure/__Host cookie the operator API reads for the STS call.
+        web_identity_cookie = None
+        if web_identity.is_enabled(config):
+            try:
+                wi_token = web_identity.mint_web_identity_token(
+                    config,
+                    WEB_IDENTITY_KEY_REGION,
+                    subject=user_id,
+                    principal_tags_claim=PRINCIPAL_TAGS_CLAIM,
+                    principal_tags_value=session_payload.get(PRINCIPAL_TAGS_CLAIM),
+                    ttl_exp=azure_exp_timestamp,
+                )
+                web_identity_cookie = (
+                    f'{cookie_prefix}web_identity={wi_token}; '
+                    f'HttpOnly; Secure; SameSite=Lax; '
+                    f'Path=/; '
+                    f'Expires={expires_str}'
+                    f'{domain_attr}'
+                )
+                logger.info('RS256 web-identity token minted (KMS kms:Sign)')
+            except Exception as e:
+                # Fail closed on the role-token half: if we cannot mint it, do not
+                # hand back a session that silently lacks role-assumption ability.
+                logger.error(f'Failed to mint web-identity token: {e}')
+                return {
+                    'status': '500',
+                    'statusDescription': 'Internal Server Error',
+                    'body': 'Role token minting failed'
+                }
         
         # Clear oauth_state cookie
         state_cookie = f'oauth_state=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0{domain_attr}'
@@ -683,17 +746,20 @@ def lambda_handler(event, context):
         verifier_cookie = f'code_verifier=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0{domain_attr}'
         
         logger.info('Step 4: Building redirect response')
+        set_cookie_headers = [
+            {'key': 'Set-Cookie', 'value': auth_cookie},
+            {'key': 'Set-Cookie', 'value': azure_cookie},
+        ]
+        if web_identity_cookie:
+            set_cookie_headers.append({'key': 'Set-Cookie', 'value': web_identity_cookie})
+        set_cookie_headers.append({'key': 'Set-Cookie', 'value': state_cookie})
+        set_cookie_headers.append({'key': 'Set-Cookie', 'value': verifier_cookie})
         response = {
             'status': '302',
             'statusDescription': 'Found',
             'headers': {
                 'location': [{'key': 'Location', 'value': redirect_path}],
-                'set-cookie': [
-                    {'key': 'Set-Cookie', 'value': auth_cookie},
-                    {'key': 'Set-Cookie', 'value': azure_cookie},
-                    {'key': 'Set-Cookie', 'value': state_cookie},
-                    {'key': 'Set-Cookie', 'value': verifier_cookie}
-                ],
+                'set-cookie': set_cookie_headers,
                 'cache-control': [{'key': 'Cache-Control', 'value': 'no-store'}]
             }
         }
