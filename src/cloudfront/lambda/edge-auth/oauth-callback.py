@@ -31,6 +31,32 @@ sns_client = None
 HMAC_SECRET = None
 CONFIG = None
 
+# The AWS principal-tags claim key. Scope principal tags are encoded into this
+# claim in the same `:k=v:` shape the Cognito resolver and the pre-token
+# injector emit, so the edge / AssumeRole path reads one format across IdPs.
+PRINCIPAL_TAGS_CLAIM = 'https://aws.amazon.com/tags/principal_tags/Claims'
+
+
+def encode_principal_tags(tags):
+    """Encode a {name: value} tag map into the `:k=v:k2=v2:` principal-tags
+    claim string. Returns None for an empty/falsy map. Pure and deterministic."""
+    if not tags:
+        return None
+    return ':' + ':'.join(f'{name}={val}' for name, val in tags.items()) + ':'
+
+
+def assembled_token_len(header_b64, payload_b64):
+    """Byte length of the assembled compact JWS: header + '.' + payload + '.' +
+    a 43-byte base64url HS256 signature segment. Matches the Cognito mint's
+    guard arithmetic exactly so the two mints refuse at the same ceiling."""
+    return len(header_b64) + 1 + len(payload_b64) + 1 + 43
+
+
+def scope_token_exceeds(header_b64, payload_b64, max_bytes):
+    """True when the assembled token is over `max_bytes` (refuse, never truncate)."""
+    return assembled_token_len(header_b64, payload_b64) > max_bytes
+
+
 def get_config_cached():
     """Get cached config"""
     global CONFIG, dynamodb, sns_client
@@ -432,6 +458,7 @@ def lambda_handler(event, context):
         # Post-auth identity hook: call external endpoint to resolve application-specific claims
         # (e.g., Medusa customer_id). Only called when post_auth_hook_url is configured.
         additional_claims = {}
+        scope_principal_tags = {}
         post_auth_hook_url = config.get('post_auth_hook_url')
         if post_auth_hook_url:
             logger.info(f'Step 2.5: Calling post-auth identity hook: {post_auth_hook_url}')
@@ -452,6 +479,12 @@ def lambda_handler(event, context):
                 with urllib.request.urlopen(hook_req, timeout=hook_timeout) as hook_response:
                     hook_result = json.loads(hook_response.read().decode('utf-8'))
                     additional_claims = hook_result.get('additional_claims', {})
+                    # Scope principal tags (R: AWS principal-tags for AssumeRole
+                    # session tags). Captured here, encoded into the principal-tags
+                    # claim after the whitelist filter below — the same `:k=v:`
+                    # shape the Cognito resolver emits, gated by the same whitelist
+                    # entry for the principal-tags claim key.
+                    scope_principal_tags = hook_result.get('principal_tags', {})
                     logger.info(f'Post-auth hook returned additional claims: {list(additional_claims.keys())}')
                     
                     # Check if hook signals a redirect (e.g., confirmation required)
@@ -518,6 +551,19 @@ def lambda_handler(event, context):
             "iss": redirect_uri,
             "idp": payload.get("iss")
         }
+
+        # Scope principal tags -> the AWS principal-tags claim, in the same
+        # `:k=v:` shape the Cognito resolver and the pre-token injector emit, so
+        # the edge/AssumeRole path reads one consistent format regardless of IdP.
+        # Gated by the whitelist exactly like a role claim: when a whitelist is
+        # configured the tag claim key must be in it; with no whitelist the
+        # fallback allows it (consistent with the claim-filter fallback above).
+        if scope_principal_tags:
+            tag_allowed = (PRINCIPAL_TAGS_CLAIM in whitelist) if jwt_claims_whitelist_str else True
+            if tag_allowed:
+                encoded_tags = encode_principal_tags(scope_principal_tags)
+                if encoded_tags is not None:
+                    session_payload[PRINCIPAL_TAGS_CLAIM] = encoded_tags
         
         # Store session in DynamoDB
         if table_name and user_id:
@@ -570,7 +616,27 @@ def lambda_handler(event, context):
         payload_b64 = base64.urlsafe_b64encode(
             json.dumps(session_payload, separators=(',', ':')).encode()
         ).decode().rstrip('=')
-        
+
+        # Scope-token size guard — refuse (never truncate) an over-budget token.
+        # Mirrors the Cognito mint's guard exactly: the check runs on the
+        # ASSEMBLED token (header + payload + a 43-byte base64url HS256 signature
+        # segment, plus the two '.' separators) BEFORE the cookie is built, so a
+        # partial set of resolver-merged role claims / scope principal tags can
+        # never be signed. A grid that cannot fit signals a mismodelled
+        # assignment, fixed in the assignment model, not coped with here.
+        scope_token_max_bytes = int(config.get('scope_token_max_bytes', '7168'))
+        if scope_token_exceeds(header_b64, payload_b64, scope_token_max_bytes):
+            assembled_len = assembled_token_len(header_b64, payload_b64)
+            logger.error(
+                f'Assembled session token is {assembled_len} bytes, over '
+                f'{scope_token_max_bytes}; refusing mint'
+            )
+            return {
+                'status': '500',
+                'statusDescription': 'Internal Server Error',
+                'body': 'Session scope exceeds the token size limit'
+            }
+
         signing_input = f"{header_b64}.{payload_b64}"
         hmac_secret = get_hmac_secret()
         signature = hmac.new(

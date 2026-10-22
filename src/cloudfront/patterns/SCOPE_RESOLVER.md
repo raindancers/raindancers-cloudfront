@@ -120,3 +120,31 @@ configured, the mint is byte-for-byte unchanged.**
   existing config pattern; HTTP mirrors `call_identity_hook` exactly).
 - The exact `jwtClaimsWhitelist` entries a consumer must add for its scope claim
   and the principal-tags claim.
+
+## Entra mint parity (0.0.53)
+
+The resolver merge above is implemented on the **Cognito** mint
+(`lambda/cognito-customui-session/index.py`, `CognitoSessionBackend`). The
+**Entra** mint (`lambda/edge-auth/oauth-callback.py`, `AuthInfrastructure`) is a
+separate construct for consumers whose IdP is Microsoft Entra (not Cognito), and
+it already had an older `post_auth_hook_url` that validates the identity and
+merges a hook's `additional_claims` into `session_payload`. `0.0.53` brings that
+Entra mint to parity with the Cognito resolver for the two things the hook did
+not cover:
+
+- **Token-size overflow-refuse.** Before signing, the assembled token
+  (`header.payload.signature`) is measured with the SAME arithmetic as the
+  Cognito guard — `len(header_b64) + 1 + len(payload_b64) + 1 + 43` — and refused
+  over `scope_token_max_bytes` (default 7168). Never truncated. Surfaced as the
+  `scopeTokenMaxBytes` prop on `AuthInfrastructure`; omitted from the config
+  secret when unset, so existing Entra consumers are byte-for-byte unchanged.
+- **First-class principal tags.** A hook result's `principal_tags` map is encoded
+  into the `https://aws.amazon.com/tags/principal_tags/Claims` claim in the same
+  `:k=v:` shape the pre-token injector and the Cognito resolver emit, gated by
+  the whitelist exactly like a role claim — so the `AssumeRole` path reads one
+  format regardless of IdP.
+
+Role-mask claims (`g`/`b`) already rode through the Entra hook's
+`additional_claims` merge. The two mints are kept as independent
+implementations (no shared helper) because they bundle into separate edge
+Lambdas; the encoding and guard are mirrored, not shared.

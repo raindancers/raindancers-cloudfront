@@ -72,6 +72,14 @@ export interface AuthInfrastructureProps {
   readonly postAuthHookFailClosed?: boolean;
   /** Enable refresh token storage. @default false */
   readonly enableRefresh?: boolean;
+  /**
+   * Ceiling (bytes) on the assembled HMAC session token. Over this, the mint is
+   * REFUSED (explicit error, logged) — never truncated, never with resolver
+   * role claims or scope principal tags dropped to fit. Mirrors the Cognito
+   * session backend's `scopeTokenMaxBytes`.
+   * @default 7168 (within the ~8 KB browser cookie budget)
+   */
+  readonly scopeTokenMaxBytes?: number;
 }
 
 export class AuthInfrastructure extends constructs.Construct {
@@ -116,6 +124,7 @@ export class AuthInfrastructure extends constructs.Construct {
       postAuthHookTimeout: props.postAuthHookTimeout,
       postAuthHookFailClosed: props.postAuthHookFailClosed,
       enableRefresh: props.enableRefresh,
+      scopeTokenMaxBytes: props.scopeTokenMaxBytes,
     });
 
     const auditLogRetentionDays = props.auditLogRetentionDays ?? 30;
