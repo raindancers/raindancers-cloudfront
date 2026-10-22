@@ -29,6 +29,14 @@ export interface AuthSecretManagerProps {
   readonly postAuthHookFailClosed?: boolean;
   /** Whether to store refresh tokens for silent session renewal. @default false */
   readonly enableRefresh?: boolean;
+  /**
+   * Ceiling (bytes) on the assembled HMAC session token. When set, written into
+   * the config secret as `scope_token_max_bytes`; the mint refuses an
+   * over-budget token rather than truncating. Omitted from the secret when
+   * unset, so the mint's built-in 7168-byte default applies and the secret
+   * template is byte-for-byte unchanged for existing consumers.
+   */
+  readonly scopeTokenMaxBytes?: number;
 }
 
 export class AuthSecretManager extends constructs.Construct {
@@ -62,27 +70,33 @@ export class AuthSecretManager extends constructs.Construct {
     ];
 
     const configSecretName = `cloudfront-auth-config-${props.domainName}`;
+    const configTemplate: Record<string, string> = {
+      azure_tenant_id: props.azureTenantId,
+      azure_client_id: props.azureClientId,
+      redirect_uri: `https://${props.domainName}/oauth2/callback`,
+      sts_audience: props.stsAudience,
+      dynamodb_table_name: props.tableName,
+      dynamodb_region: props.tableRegion,
+      security_alerts_topic_arn: props.securityAlertsTopicArn || '',
+      auto_revoke_on_reuse: props.autoRevokeOnReuse ? 'true' : 'false',
+      jwt_claims_whitelist: JSON.stringify(jwtClaimsWhitelist),
+      allowed_domains: JSON.stringify(props.allowedDomains ?? [props.domainName]),
+      cookie_domain: props.cookieDomain || '',
+      post_auth_hook_url: props.postAuthHookUrl || '',
+      post_auth_hook_timeout: String(props.postAuthHookTimeout ?? 3),
+      post_auth_hook_fail_closed: (props.postAuthHookFailClosed ?? true) ? 'true' : 'false',
+      enable_refresh: props.enableRefresh ? 'true' : 'false',
+    };
+    // Only emitted when explicitly set, so the mint's built-in 7168 default
+    // applies and the secret template is byte-for-byte unchanged otherwise.
+    if (props.scopeTokenMaxBytes !== undefined) {
+      configTemplate.scope_token_max_bytes = String(props.scopeTokenMaxBytes);
+    }
     this.configSecret = new secretsmanager.Secret(this, 'ConfigSecret', {
       secretName: configSecretName,
       encryptionKey: this.kmsKey,
       generateSecretString: {
-        secretStringTemplate: JSON.stringify({
-          azure_tenant_id: props.azureTenantId,
-          azure_client_id: props.azureClientId,
-          redirect_uri: `https://${props.domainName}/oauth2/callback`,
-          sts_audience: props.stsAudience,
-          dynamodb_table_name: props.tableName,
-          dynamodb_region: props.tableRegion,
-          security_alerts_topic_arn: props.securityAlertsTopicArn || '',
-          auto_revoke_on_reuse: props.autoRevokeOnReuse ? 'true' : 'false',
-          jwt_claims_whitelist: JSON.stringify(jwtClaimsWhitelist),
-          allowed_domains: JSON.stringify(props.allowedDomains ?? [props.domainName]),
-          cookie_domain: props.cookieDomain || '',
-          post_auth_hook_url: props.postAuthHookUrl || '',
-          post_auth_hook_timeout: String(props.postAuthHookTimeout ?? 3),
-          post_auth_hook_fail_closed: (props.postAuthHookFailClosed ?? true) ? 'true' : 'false',
-          enable_refresh: props.enableRefresh ? 'true' : 'false',
-        }),
+        secretStringTemplate: JSON.stringify(configTemplate),
         generateStringKey: 'hmac_key',
         excludePunctuation: true,
         passwordLength: 64,
