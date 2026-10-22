@@ -201,9 +201,12 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
     const webIdentityKeyArn = enableWebIdentityToken
       ? ssm.StringParameter.valueForStringParameter(this, `${p}/webIdentityKeyArn`)
       : undefined;
-    const webIdentityKeyRegion = enableWebIdentityToken
-      ? ssm.StringParameter.valueForStringParameter(this, `${p}/webIdentityKeyRegion`)
-      : undefined;
+    // The asymmetric signing key is created by AuthInfrastructure in the auth
+    // region, which is exactly `props.authRegion`. Use that concrete string for
+    // the mint's kms:Sign region — NOT an ssm.valueForStringParameter read,
+    // whose value is a deploy-time CDK token that would serialize into the
+    // generated Python as the literal `${Token[...]}` and make the Lambda@Edge
+    // throw at init (CloudFront 500 "Configuration error").
     if (enableWebIdentityToken && !props.webIdentityIssuer) {
       throw new Error('enableWebIdentityToken requires webIdentityIssuer (must match the AuthInfrastructure value).');
     }
@@ -293,7 +296,7 @@ CONFIG_REGION = '${props.authRegion}'
 # RS256 web-identity half: region of the asymmetric KMS signing key, so the
 # mint's kms:Sign targets the right region (Lambda@Edge runs globally; the key
 # is a single regional key). Empty when the feature is off.
-WEB_IDENTITY_KEY_REGION = '${enableWebIdentityToken ? (webIdentityKeyRegion ?? '') : ''}'
+WEB_IDENTITY_KEY_REGION = '${enableWebIdentityToken ? props.authRegion : ''}'
 
 def get_config():
     logger.info(f'Attempting to load config from Secrets Manager')
