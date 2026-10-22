@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Permissions Admin</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 2rem; max-width: 60rem; }
+    h1 { font-size: 1.4rem; }
+    section { margin: 1.5rem 0; padding: 1rem 1.25rem; border: 1px solid #8884; border-radius: 8px; }
+    .hidden { display: none; }
+    .muted { opacity: 0.6; font-size: 0.9rem; }
+    button { padding: 0.4rem 0.8rem; margin-right: 0.5rem; }
+    code { font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>Permissions Admin</h1>
+  <p id="status" class="muted">Loading your permissions…</p>
+
+  <!-- Every action starts HIDDEN and is revealed only if the reflection
+       endpoint says the caller holds the matching management permission
+       (fail-closed to hidden, R9.2). The server re-checks every call (R10). -->
+  <section id="roles-screen" class="hidden">
+    <h2>Roles</h2>
+    <button data-op="listRoles" class="hidden" id="btn-list-roles">List roles</button>
+    <button data-op="createRole" class="hidden" id="btn-create-role">Create role</button>
+    <button data-op="deleteRole" class="hidden" id="btn-delete-role">Delete role</button>
+  </section>
+
+  <section id="scopes-screen">
+    <h2 id="scopes-title">Scopes</h2>
+    <p class="muted">Read-only, from the injected scope source.</p>
+  </section>
+
+  <section id="assignments-screen" class="hidden">
+    <h2>Assignments</h2>
+    <button data-op="listAssignments" class="hidden" id="btn-list-assignments">List assignments</button>
+    <button data-op="createAssignment" class="hidden" id="btn-create-assignment">Grant</button>
+    <button data-op="deleteAssignment" class="hidden" id="btn-delete-assignment">Revoke</button>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

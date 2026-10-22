@@ -25,6 +25,8 @@ tsconfig.tsbuildinfo
 .devcontainer/
 !/lib/**/*.py
 !/lib/**/*.sh
+!/lib/**/*.html
+!/lib/**/*.css
 !/lib/**/requirements.txt
 !/lib/**/Dockerfile
 !/lib/**/host.json

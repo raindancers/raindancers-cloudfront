@@ -7,6 +7,34 @@ import { AuditLogArchive } from '../logging/auditLogArchive';
 import { SsmCrossRegionWriter } from '../ssmCrossRegionWriter';
 
 /**
+ * Opt-in Scope Resolver configuration for {@link CognitoSessionBackend}.
+ *
+ * When supplied, the session-mint Lambda POSTs the verified identity to
+ * {@link endpointUrl} and merges the resolver's returned role claims and scope
+ * principal tags into the minted HMAC session token, subject to the
+ * {@link CognitoSessionBackendProps.jwtClaimsWhitelist}. The call shape, bearer
+ * secret, and bounded-timeout failure posture mirror the existing identity hook
+ * exactly. Absent by default — the mint is byte-for-byte unchanged without it.
+ *
+ * Despite the name, the resolver reads the whole `(role, scope)` authority
+ * model: role → a signed claim (16-bit bitmasks per scope, consumed by the
+ * consumer app's authorization checks), scope → a principal tag (consumed by
+ * `AssumeRole` session tags for AWS-level enforcement).
+ */
+export interface ScopeResolverConfig {
+  /** HTTPS endpoint the mint POSTs the verified identity to (POST, JSON body). */
+  readonly endpointUrl: string;
+  /**
+   * Secrets Manager ARN of a shared bearer secret sent as
+   * `Authorization: Bearer <secret>`. Optional; mirrors the identity hook. When
+   * set, the mint Lambda's role is granted `secretsmanager:GetSecretValue` on it.
+   */
+  readonly sharedSecretArn?: string;
+  /** Request timeout in seconds. @default 3 (matches the identity hook). */
+  readonly timeoutSeconds?: number;
+}
+
+/**
  * Props for {@link CognitoSessionBackend}. Generic — no project specifics baked
  * in. Pool identifiers are passed in (from {@link CognitoCustomerPool} or any
  * externally-managed pool), so this construct is agnostic to how the pool was
@@ -44,6 +72,22 @@ export interface CognitoSessionBackendProps {
   readonly sessionRevocationTopicArn?: string;
   readonly autoRevokeOnReuse?: boolean;
   readonly jwtClaimsWhitelist?: string[];
+  /**
+   * Opt-in {@link ScopeResolverConfig}. When set, the session mint POSTs the
+   * verified identity to the resolver and merges the returned role claims and
+   * scope principal tags into the minted token (gated by
+   * {@link jwtClaimsWhitelist}). Absent by default — mint is byte-for-byte
+   * unchanged without it.
+   */
+  readonly scopeResolver?: ScopeResolverConfig;
+  /**
+   * Ceiling (bytes) on the assembled session token. Over this, the mint is
+   * REFUSED (explicit error, logged) — never truncated, never with role claims
+   * or scope tags dropped to fit.
+   * @default 7168 (within the ~8 KB browser cookie budget, leaving headroom for
+   * the cookie name and attributes)
+   */
+  readonly scopeTokenMaxBytes?: number;
   readonly hmacSecretRotationSchedule?: core.Duration;
   readonly auditLogRetentionDays?: number;
   readonly auditArchiveRetentionDays?: number;
@@ -95,6 +139,8 @@ export class CognitoSessionBackend extends constructs.Construct {
       securityAlertsTopicArn: props.securityAlertsTopicArn,
       autoRevokeOnReuse: props.autoRevokeOnReuse,
       jwtClaimsWhitelist: props.jwtClaimsWhitelist,
+      scopeResolver: props.scopeResolver,
+      scopeTokenMaxBytes: props.scopeTokenMaxBytes,
       removalPolicy: props.removalPolicy,
     });
 

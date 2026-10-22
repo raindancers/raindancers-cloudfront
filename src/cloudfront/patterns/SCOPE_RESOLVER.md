@@ -1,10 +1,40 @@
 # Scope Resolver — computed claims and principal tags at session mint
 
-**Status:** PROPOSED (design, ahead of implementation)
+**Status:** SHIPPED (issue #47, branch `build/47-authz-constructs`)
 **Scope:** `CognitoSessionBackend` / the custom-UI session mint
 **Audience:** every consumer of the session construct (functional-self, horton,
 ntrip, smart, agentl, raindancers-crew). This capability is **additive and
 opt-in**; with it unconfigured, the construct behaves exactly as today.
+
+## Usage (shipped shape)
+
+```ts
+new CognitoSessionBackend(this, 'Backend', {
+  domainName, userPoolId, clientId, cognitoDomain,
+  // opt-in: without this block the mint is byte-for-byte unchanged.
+  scopeResolver: {
+    endpointUrl: 'https://resolver.example.com/scope', // POST, JSON identity
+    sharedSecretArn: 'arn:aws:secretsmanager:...:secret:resolver-bearer', // optional
+    timeoutSeconds: 3, // default 3 (matches the identity hook)
+  },
+  scopeTokenMaxBytes: 7168, // default; mint is REFUSED over this, never truncated
+  // jwtClaimsWhitelist gates which resolver keys are minted (reused as-is).
+});
+```
+
+The resolver HTTP contract is a `POST <endpointUrl>` with
+`{ "sub", "email", "provider": "cognito" }` (optionally `Authorization: Bearer
+<sharedSecret>`), returning `{ "claims": {...}, "principal_tags": {...} }`.
+Only `jwtClaimsWhitelist` keys are minted; a non-2xx / timeout / malformed body
+fails the mint closed (no cookie). See `design.md` in the spec for the full
+contract.
+
+**Revocation window:** the minted token's TTL is the existing
+`session_ttl_seconds` (default 3600 s) — there is no separate resolver TTL. That
+TTL is the **maximum window before a changed authorization decision takes effect
+in a live session**: a role or assignment changed in Permissions Admin is seen
+only when the user's next session is minted or on the next refresh within the
+TTL.
 
 ## Context
 

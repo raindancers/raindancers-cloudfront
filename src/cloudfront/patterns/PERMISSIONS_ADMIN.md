@@ -1,10 +1,40 @@
 # Permissions Admin — a reusable authorization management construct
 
-**Status:** PROPOSED (design, ahead of implementation)
+**Status:** SHIPPED (issue #47, branch `build/47-authz-constructs`)
 **Scope:** a NEW construct in the cloudfront package, alongside
 `CognitoSessionBackend` and the Scope Resolver (`SCOPE_RESOLVER.md`)
 **Audience:** any consumer that owns a role/permission/assignment authority model
 (horton is the first). Generic by construction — no consumer domain is baked in.
+
+## Injected-config surface (shipped shape)
+
+`PermissionsAdmin` names no consumer domain term; everything specific is
+injected:
+
+```ts
+new PermissionsAdmin(this, 'Admin', {
+  domainName,
+  distribution,            // the consumer's existing CloudFront distribution
+  assetBucket,             // the consumer's existing asset bucket
+  pathPrefix: 'admin',     // SPA under /admin/*, API under /admin/api/*
+
+  catalogue,               // atomic permissions (id + name)
+  predefinedRoles,         // immutable named subsets, fixed predefined-mask bit
+  rightsActLockout,        // permission ids never grantable through this surface
+  scopeDimension,          // { label, source, estateLevelPermissionIds } — label only
+  managementPermissions,   // which permission gates each admin op
+
+  roleTable, assignmentTable, bitRegistryTable, // injected DynamoDB store refs
+  callerIdentity: { sessionHmacSecretArn },      // verifies the session cookie
+});
+```
+
+The **regional management Lambda is the sole enforcement point**: it HMAC-checks
+the session cookie, gates each op by its `managementPermissions` entry, and
+enforces no-escalation, rights-act lockout, immutable predefined roles, and
+archive-not-delete server-side, owning the custom-role bit registry and an
+actor-stamped audit trail. The bundled SPA reflects the caller's own permissions
+and hides what they lack — it **enforces nothing**.
 
 ## Context
 
