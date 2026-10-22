@@ -1,0 +1,2 @@
+# The management Lambda uses only the AWS Lambda Python runtime's provided
+# libraries (boto3, botocore). No third-party dependencies are vendored.

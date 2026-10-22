@@ -29,7 +29,7 @@ project.addPackageIgnore('.devcontainer/');
 
 // Copy non-TypeScript assets (Lambda code, CloudFront functions, scripts) to lib/ after compile
 project.compileTask.exec(
-  'rsync -av --include="*/" --include="*.py" --include="*.js" --include="requirements.txt" --include="Dockerfile" --include="host.json" --include="*.sh" --exclude="*.ts" --exclude="*.d.ts" --exclude="*.js.map" src/ lib/',
+  'rsync -av --include="*/" --include="*.py" --include="*.js" --include="*.html" --include="*.css" --include="requirements.txt" --include="Dockerfile" --include="host.json" --include="*.sh" --exclude="*.ts" --exclude="*.d.ts" --exclude="*.js.map" src/ lib/',
 );
 
 // Pre-bundle Python Lambda dependencies for Linux x86_64 (Lambda target).
@@ -56,6 +56,8 @@ for (const bundle of lambdaBundles) {
 // Allow non-JS/DTS asset files in the npm package
 project.addPackageIgnore('!/lib/**/*.py');
 project.addPackageIgnore('!/lib/**/*.sh');
+project.addPackageIgnore('!/lib/**/*.html');
+project.addPackageIgnore('!/lib/**/*.css');
 project.addPackageIgnore('!/lib/**/requirements.txt');
 project.addPackageIgnore('!/lib/**/Dockerfile');
 project.addPackageIgnore('!/lib/**/host.json');
