@@ -86,12 +86,39 @@ export interface ManagementPermissionMap {
 /** How the management API authenticates the caller. */
 export interface CallerIdentityConfig {
   /**
-   * Secrets Manager ARN of the HMAC secret the minted `__Host-auth_session`
-   * cookie is signed with — the API verifies the cookie against it.
+   * HTTPS URL of the consumer's published JWKS — the RS256 public keys the
+   * caller's `web_identity` token is verified against. The two-token model: the
+   * HMAC session cookie is validated ONLY at the CloudFront edge; behind the
+   * edge the caller is identified by the asymmetric `web_identity` token alone,
+   * so NO HMAC secret is read here.
    */
-  readonly sessionHmacSecretArn: string;
-  /** Cookie name carrying the session token. @default '__Host-auth_session' */
+  readonly jwksUri: string;
+  /**
+   * Expected token issuer (`iss`). When set, the API rejects a token whose
+   * issuer differs. @default no issuer check
+   */
+  readonly issuer?: string;
+  /**
+   * Expected token audience (`aud`). When set, the API rejects a token whose
+   * audience differs. @default no audience check
+   */
+  readonly audience?: string;
+  /** Cookie name carrying the `web_identity` token. @default '__Host-web_identity' */
   readonly sessionCookieName?: string;
+  /**
+   * The IAM OIDC provider ARN registered for the consumer's token issuer
+   * (horton's JWKS issuer, NOT the IdP). The management role's trust policy pins
+   * this provider so the Lambda can exchange the caller's token for the role via
+   * `sts:AssumeRoleWithWebIdentity`.
+   */
+  readonly webIdentityOidcProviderArn: string;
+  /**
+   * The `sub` the management role's trust policy pins (the token subject allowed
+   * to assume it). @default no sub condition (any token from the pinned provider
+   * with the right audience may assume — the management-permission authZ in the
+   * Lambda is the real gate)
+   */
+  readonly trustedSubject?: string;
 }
 
 /**
@@ -154,6 +181,12 @@ export interface PermissionsAdminProps {
 export class PermissionsAdmin extends constructs.Construct {
   /** The regional management Lambda (sole enforcement point). */
   public readonly managementFunction: lambda.Function;
+  /**
+   * The estate management role the Lambda assumes per request (via the caller's
+   * web_identity token). Holds the only grants on the three authority tables;
+   * the Lambda's own role has none.
+   */
+  public readonly managementRole: core.aws_iam.Role;
   /** The regional HTTP API fronting the management Lambda. */
   public readonly httpApi: apigwv2.HttpApi;
   /** The path prefix the SPA + API mount under. */
@@ -164,9 +197,57 @@ export class PermissionsAdmin extends constructs.Construct {
 
     const pathPrefix = (props.pathPrefix ?? 'admin').replace(/^\/+|\/+$/g, '');
     this.pathPrefix = pathPrefix;
-    const sessionCookieName = props.callerIdentity.sessionCookieName ?? '__Host-auth_session';
+    const sessionCookieName = props.callerIdentity.sessionCookieName ?? '__Host-web_identity';
     const assignmentRoleIndexName = props.assignmentRoleIndexName ?? 'roleId-index';
     const logRetention = props.logRetention ?? logs.RetentionDays.ONE_MONTH;
+
+    // --- the estate MANAGEMENT role (two-token model, R16) -------------------
+    // The management Lambda holds NO standing table grants. Instead it exchanges
+    // the caller's RS256 `web_identity` token for THIS role via
+    // sts:AssumeRoleWithWebIdentity and uses the scoped credentials for every
+    // table call. The role is trusted by the consumer's own OIDC provider (its
+    // JWKS issuer), pinned to the token audience (and optionally subject). Its
+    // permission policy reaches exactly the three AUTHORITY tables — these are
+    // estate-level stores (not brand-partitioned), so there is NO LeadingKeys
+    // condition; the management-permission authZ in the Lambda is the gate on
+    // WHO may write them.
+    const oidcCondition: Record<string, Record<string, string>> = {};
+    if (props.callerIdentity.audience) {
+      // The OIDC provider URL without scheme is the condition key prefix AWS uses
+      // for aud/sub on AssumeRoleWithWebIdentity.
+      const providerHost = core.Fn.select(1, core.Fn.split('oidc-provider/', props.callerIdentity.webIdentityOidcProviderArn));
+      oidcCondition.StringEquals = { [`${providerHost}:aud`]: props.callerIdentity.audience };
+    }
+    if (props.callerIdentity.trustedSubject) {
+      oidcCondition.StringEquals = {
+        ...(oidcCondition.StringEquals ?? {}),
+        [`${core.Fn.select(1, core.Fn.split('oidc-provider/', props.callerIdentity.webIdentityOidcProviderArn))}:sub`]:
+          props.callerIdentity.trustedSubject,
+      };
+    }
+    const managementRole = new core.aws_iam.Role(this, 'ManagementRole', {
+      assumedBy: new core.aws_iam.WebIdentityPrincipal(
+        props.callerIdentity.webIdentityOidcProviderArn,
+        Object.keys(oidcCondition).length ? oidcCondition : undefined,
+      ),
+      description: `permissions-admin estate management role for ${props.domainName} — assumed per request via the caller's web_identity token`,
+      maxSessionDuration: core.Duration.hours(1),
+    });
+    // Permission policy: exactly the three authority tables + the role-in-use GSI.
+    managementRole.addToPolicy(new core.aws_iam.PolicyStatement({
+      effect: core.aws_iam.Effect.ALLOW,
+      actions: [
+        'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query',
+        'dynamodb:Scan', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem',
+      ],
+      resources: [
+        props.roleTable.tableArn,
+        props.bitRegistryTable.tableArn,
+        props.assignmentTable.tableArn,
+        `${props.assignmentTable.tableArn}/index/*`,
+      ],
+    }));
+    this.managementRole = managementRole;
 
     // --- regional management Lambda (standard Lambda: env vars + full SDK) ----
     const fn = new lambda.Function(this, 'ManagementHandler', {
@@ -188,8 +269,13 @@ export class PermissionsAdmin extends constructs.Construct {
         ASSIGNMENT_TABLE: props.assignmentTable.tableName,
         BIT_REGISTRY_TABLE: props.bitRegistryTable.tableName,
         ASSIGNMENT_ROLE_INDEX: assignmentRoleIndexName,
-        SESSION_HMAC_SECRET_ARN: props.callerIdentity.sessionHmacSecretArn,
+        // AuthN: verify the caller's RS256 web_identity token against the JWKS.
+        JWKS_URI: props.callerIdentity.jwksUri,
+        TOKEN_ISSUER: props.callerIdentity.issuer ?? '',
+        TOKEN_AUDIENCE: props.callerIdentity.audience ?? '',
         SESSION_COOKIE_NAME: sessionCookieName,
+        // Store access: assume this role per request (no standing grants).
+        MANAGEMENT_ROLE_ARN: managementRole.roleArn,
         PATH_PREFIX: pathPrefix,
         CATALOGUE: JSON.stringify(props.catalogue.permissions),
         PREDEFINED_ROLES: JSON.stringify(props.predefinedRoles),
@@ -201,20 +287,10 @@ export class PermissionsAdmin extends constructs.Construct {
     });
     this.managementFunction = fn;
 
-    // --- least-privilege store grants (R8.3, R16) ----------------------------
-    // Roles are read + written (create/archive); bit registry read + written
-    // (allocate/retire); assignments read + written (grant/revoke), plus a read
-    // on the "role in use?" GSI for archive-not-delete.
-    props.roleTable.grantReadWriteData(fn);
-    props.bitRegistryTable.grantReadWriteData(fn);
-    props.assignmentTable.grantReadWriteData(fn);
-
-    // Read the session HMAC secret to verify the caller's cookie.
-    fn.addToRolePolicy(new core.aws_iam.PolicyStatement({
-      effect: core.aws_iam.Effect.ALLOW,
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [props.callerIdentity.sessionHmacSecretArn],
-    }));
+    // The Lambda's OWN role gets NO table grants and NO secret read. Its only
+    // added power is to assume the management role via web identity — which is a
+    // public STS call needing no caller-side IAM, so there is nothing to grant
+    // here. Store authority lives entirely on the assumed role above.
 
     // --- regional HTTP API ---------------------------------------------------
     const httpApi = new apigwv2.HttpApi(this, 'ManagementApi', {

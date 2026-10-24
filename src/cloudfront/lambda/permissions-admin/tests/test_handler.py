@@ -3,14 +3,14 @@
 Pure-stdlib `unittest` (no pytest/moto/boto3), matching scim-provisioning/tests.
 Run: python3 -m unittest discover -s tests -p 'test_*.py'
 
-A minimal in-memory DynamoDB stands in for the three injected tables via a fake
-`_ddb()` resource. Sessions are real HS256 cookies signed with a known secret so
-authN runs for real. Each test sets the handler's env config and resets caches.
+A minimal in-memory DynamoDB stands in for the three injected tables. AuthN is
+the RS256 `web_identity` token verified against a JWKS — real crypto is out of
+scope for these behavioural tests, so `verify_web_identity` is stubbed to return
+the caller's claims, and `assume_management_role` is stubbed to hand back the
+in-memory DynamoDB (the two-token model's per-request assumed resource). Each
+test sets the handler's env config and resets caches.
 """
 
-import base64
-import hashlib
-import hmac
 import json
 import os
 import sys
@@ -21,8 +21,6 @@ HANDLER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HANDLER_DIR)
 
 import index  # noqa: E402
-
-SECRET = 'test-session-secret'
 
 
 # --- in-memory DynamoDB ------------------------------------------------------
@@ -79,22 +77,19 @@ class FakeDdb:
         return self.tables.setdefault(name, FakeTable())
 
 
-def _cookie(sub='admin', permissions=None, exp=None):
-    payload = {'sub': sub, 'permissions': permissions or [], 'exp': exp or (int(time.time()) + 3600)}
-
-    def b64(d):
-        return base64.urlsafe_b64encode(d).decode().rstrip('=')
-    header_b64 = b64(json.dumps({'alg': 'HS256', 'typ': 'JWT'}).encode())
-    payload_b64 = b64(json.dumps(payload).encode())
-    sig = hmac.new(SECRET.encode(), f'{header_b64}.{payload_b64}'.encode(), hashlib.sha256).digest()
-    token = f'{header_b64}.{payload_b64}.{b64(sig)}'
-    return f'__Host-auth_session={token}'
-
-
-def _event(method, resource, body=None, cookie=None, sub='admin', permissions=None):
+def _event(method, resource, body=None, sub='admin', permissions=None, bad_token=False):
+    """Build an API event. The cookie value is a JSON blob the stubbed
+    verify_web_identity decodes into claims (real RS256/JWKS verification is
+    covered by the construct's wiring, not these behavioural tests). bad_token
+    simulates a verification failure (-> 401)."""
+    if bad_token:
+        cookie = '__Host-web_identity=invalid'
+    else:
+        claims = {'sub': sub, 'permissions': permissions or [], 'exp': int(time.time()) + 3600}
+        cookie = '__Host-web_identity=' + json.dumps(claims)
     return {
         'requestContext': {'http': {'method': method, 'path': f'/admin/api/{resource}'}},
-        'headers': {'cookie': cookie or _cookie(sub=sub, permissions=permissions)},
+        'headers': {'cookie': cookie},
         'body': json.dumps(body) if body is not None else None,
     }
 
@@ -102,13 +97,27 @@ def _event(method, resource, body=None, cookie=None, sub='admin', permissions=No
 class PermissionsAdminTests(unittest.TestCase):
     def setUp(self):
         self.ddb = FakeDdb()
-        index._DDB = self.ddb
-        index._SESSION_SECRET = SECRET
-        index._SECRETS = None
+
+        # Stub authN: decode the claims the test embedded in the cookie, or None
+        # for the invalid-token case. No real RS256/JWKS in behavioural tests.
+        def fake_verify(cookie_header):
+            if not cookie_header or '=invalid' in cookie_header:
+                return None
+            raw = cookie_header.split('__Host-web_identity=', 1)[1]
+            return json.loads(raw), 'web-identity-token'
+        index.verify_web_identity = fake_verify
+
+        # Stub the token->role exchange: hand back the in-memory DynamoDB as the
+        # per-request assumed resource (the real assume_role_with_web_identity is
+        # construct-wiring, not handler logic).
+        index.assume_management_role = lambda token, actor: self.ddb
+
         os.environ.update({
             'ROLE_TABLE': 'roles', 'ASSIGNMENT_TABLE': 'assignments',
             'BIT_REGISTRY_TABLE': 'bits', 'ASSIGNMENT_ROLE_INDEX': 'roleId-index',
-            'SESSION_COOKIE_NAME': '__Host-auth_session',
+            'SESSION_COOKIE_NAME': '__Host-web_identity',
+            'JWKS_URI': 'https://example.test/.well-known/jwks.json',
+            'MANAGEMENT_ROLE_ARN': 'arn:aws:iam::123456789012:role/mgmt',
             'MANAGEMENT_PERMISSIONS': json.dumps({
                 'createRole': 'mgmt.role.create', 'deleteRole': 'mgmt.role.delete',
                 'listRoles': 'mgmt.role.list', 'createAssignment': 'mgmt.assign.create',
@@ -127,7 +136,7 @@ class PermissionsAdminTests(unittest.TestCase):
                 if str(v.get('pk', '')).startswith('AUDIT#')]
 
     def test_invalid_session_401(self):
-        ev = _event('GET', 'roles', cookie='__Host-auth_session=garbage')
+        ev = _event('GET', 'roles', bad_token=True)
         self.assertEqual(index.handler(ev, None)['statusCode'], 401)
 
     def test_missing_management_permission_denied(self):

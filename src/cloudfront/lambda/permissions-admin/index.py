@@ -3,7 +3,9 @@
 The SOLE enforcement point for the (role, scope, assignment) authority model.
 Every request runs one gate order:
 
-  1. authN  — HMAC-verify the session cookie against the injected secret (R10.1).
+  1. authN  — RS256-verify the caller's `web_identity` token against the
+              published JWKS (R10.1). HMAC is the CloudFront edge's concern and
+              is never used here (two-token model).
   2. authZ  — the op's required management permission is in the caller's own
               role claims, else 403 fail-closed (R10.2).
   3. invariants (server-side, R11):
@@ -23,9 +25,6 @@ Config comes from env vars (this is a regional Lambda, not Lambda@Edge). boto3
 is imported lazily so unit tests can patch the DynamoDB layer without AWS.
 """
 
-import base64
-import hashlib
-import hmac
 import json
 import logging
 import os
@@ -34,35 +33,77 @@ import time
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-_DDB = None
-_SECRETS = None
-_SESSION_SECRET = None
+_JWKS_CLIENT = None
+_STS = None
+
+# Per-request assumed-role DynamoDB resource. The management Lambda carries NO
+# standing table grants (two-token model); it exchanges the caller's RS256
+# `web_identity` token for the estate management role via
+# sts:AssumeRoleWithWebIdentity and uses THOSE scoped credentials for every
+# table call in the request. A ContextVar keeps it request-local so the 11
+# _ddb() call sites need no signature change and concurrent invokes never share
+# credentials.
+import contextvars
+_REQUEST_DDB: 'contextvars.ContextVar' = contextvars.ContextVar('request_ddb', default=None)
 
 TAG_CLAIM = 'https://aws.amazon.com/tags/principal_tags/Claims'
 
 
 # --- lazy AWS accessors (patchable in tests) ---------------------------------
 def _ddb():
-    global _DDB
-    if _DDB is None:
-        import boto3
-        _DDB = boto3.resource('dynamodb')
-    return _DDB
+    """The DynamoDB resource for THIS request — the assumed-role credentials set
+    by assume_management_role(). Tests patch this directly; in the Lambda it is
+    never the function's own role (which has no table access)."""
+    res = _REQUEST_DDB.get()
+    if res is None:
+        # No request-scoped resource: either a test that patched _ddb, or a
+        # misuse. Fail closed rather than silently fall back to standing creds.
+        raise RuntimeError('no assumed-role DynamoDB resource for this request')
+    return res
 
 
-def _session_secret():
-    global _SECRETS, _SESSION_SECRET
-    if _SESSION_SECRET is not None:
-        return _SESSION_SECRET
-    arn = os.environ.get('SESSION_HMAC_SECRET_ARN', '')
-    if not arn:
-        _SESSION_SECRET = ''
-        return _SESSION_SECRET
-    if _SECRETS is None:
+def _sts():
+    global _STS
+    if _STS is None:
         import boto3
-        _SECRETS = boto3.client('secretsmanager')
-    _SESSION_SECRET = _SECRETS.get_secret_value(SecretId=arn).get('SecretString', '')
-    return _SESSION_SECRET
+        _STS = boto3.client('sts')
+    return _STS
+
+
+def assume_management_role(web_identity_token, actor):
+    """Exchange the caller's RS256 `web_identity` token for the estate management
+    role via sts:AssumeRoleWithWebIdentity, and return a DynamoDB resource bound
+    to those scoped credentials. The Lambda holds no table grants of its own; all
+    store access flows through this assumed role (R16, two-token model).
+
+    The role ARN is injected as MANAGEMENT_ROLE_ARN. The authority tables are
+    estate-level (no brand LeadingKeys), so no session tag is needed — the role's
+    own permission policy scopes it to exactly the three authority tables."""
+    role_arn = _cfg('MANAGEMENT_ROLE_ARN')
+    import boto3
+    creds = _sts().assume_role_with_web_identity(
+        RoleArn=role_arn,
+        RoleSessionName=f'perm-admin-{(actor or "caller")[:48]}',
+        WebIdentityToken=web_identity_token,
+    )['Credentials']
+    return boto3.resource(
+        'dynamodb',
+        aws_access_key_id=creds['AccessKeyId'],
+        aws_secret_access_key=creds['SecretAccessKey'],
+        aws_session_token=creds['SessionToken'],
+    )
+
+
+def _jwks_client():
+    """Cache a PyJWKClient over the consumer's published JWKS (execution-context
+    reuse keeps the key fetch off the hot path). HMAC is NOT used here — the
+    HMAC session cookie is the CloudFront edge's concern; behind the edge the
+    caller is identified by the RS256 `web_identity` token alone."""
+    global _JWKS_CLIENT
+    if _JWKS_CLIENT is None:
+        from jwt import PyJWKClient
+        _JWKS_CLIENT = PyJWKClient(_cfg('JWKS_URI'))
+    return _JWKS_CLIENT
 
 
 # --- config ------------------------------------------------------------------
@@ -88,10 +129,6 @@ def _rights_act_lockout():
 
 
 # --- helpers -----------------------------------------------------------------
-def _b64url_decode(data):
-    return base64.urlsafe_b64decode(data + '=' * (-len(data) % 4))
-
-
 def _response(status, body):
     return {
         'statusCode': status,
@@ -100,16 +137,21 @@ def _response(status, body):
     }
 
 
-def verify_session(cookie_header):
-    """HMAC-verify the __Host-auth_session cookie. Returns claims dict or None.
+def verify_web_identity(cookie_header):
+    """RS256-verify the `web_identity` token cookie against the JWKS. Returns
+    `(claims, raw_token)` on success, or None.
 
-    The cookie is a `header.payload.sig` HS256 token signed with the session
-    HMAC secret (the same secret the mint Lambda uses). A bad signature, a
-    malformed token, or an expired token returns None (-> 401).
+    The two-token model: the CloudFront edge already HMAC-validated the session
+    cookie before this request reached the regional API, so authN HERE reads the
+    asymmetric `web_identity` token (the same token the operator API exchanges
+    for a role) and verifies it against the consumer's published JWKS — no shared
+    secret, no HMAC. The raw token is returned too so the handler can exchange it
+    for the management role (sts:AssumeRoleWithWebIdentity). A
+    missing/malformed/expired token or a bad signature returns None (-> 401).
     """
     if not cookie_header:
         return None
-    cookie_name = _cfg('SESSION_COOKIE_NAME', '__Host-auth_session')
+    cookie_name = _cfg('SESSION_COOKIE_NAME', '__Host-web_identity')
     token = None
     for part in cookie_header.split(';'):
         part = part.strip()
@@ -118,22 +160,27 @@ def verify_session(cookie_header):
             break
     if not token:
         return None
+    import jwt
     try:
-        header_b64, payload_b64, sig_b64 = token.split('.')
-    except ValueError:
+        signing_key = _jwks_client().get_signing_key_from_jwt(token)
+        issuer = _cfg('TOKEN_ISSUER') or None
+        audience = _cfg('TOKEN_AUDIENCE') or None
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=['RS256'],
+            issuer=issuer,
+            audience=audience,
+            options={
+                'require': ['exp', 'iat'],
+                'verify_aud': audience is not None,
+                'verify_iss': issuer is not None,
+            },
+        )
+        return claims, token
+    except Exception as exc:  # jwt.InvalidTokenError and any key-fetch failure
+        logger.info(f'web_identity verification failed: {type(exc).__name__}')
         return None
-    secret = _session_secret()
-    expected = hmac.new(secret.encode(), f'{header_b64}.{payload_b64}'.encode(), hashlib.sha256).digest()
-    actual = _b64url_decode(sig_b64)
-    if not hmac.compare_digest(expected, actual):
-        return None
-    try:
-        claims = json.loads(_b64url_decode(payload_b64))
-    except Exception:
-        return None
-    if claims.get('exp') is not None and int(time.time()) >= int(claims['exp']):
-        return None
-    return claims
 
 
 def caller_permissions(claims):
@@ -379,12 +426,22 @@ def handler(event, context):
     method, resource = _route(event)
 
     headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
-    claims = verify_session(headers.get('cookie'))
-    if not claims:
+    verified = verify_web_identity(headers.get('cookie'))
+    if not verified:
         return _response(401, {'error': 'invalid_session'})
+    claims, web_identity_token = verified
 
     actor = claims.get('sub', '')
     held = caller_permissions(claims)
+
+    # Exchange the caller's token for the estate management role and bind every
+    # table call in this request to those scoped credentials. The Lambda itself
+    # holds no table grants (two-token model); a failure here is fail-closed.
+    try:
+        _REQUEST_DDB.set(assume_management_role(web_identity_token, actor))
+    except Exception as exc:
+        logger.error(f'assume_management_role failed: {type(exc).__name__}')
+        return _response(403, {'error': 'role_assumption_failed'})
 
     try:
         body = json.loads(event.get('body') or '{}')

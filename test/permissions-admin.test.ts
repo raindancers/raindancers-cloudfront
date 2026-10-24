@@ -58,7 +58,11 @@ function synth(): { template: Template; stack: core.Stack } {
     assignmentTable: table(stack, 'AssignmentTable'),
     bitRegistryTable: table(stack, 'BitRegistryTable'),
     callerIdentity: {
-      sessionHmacSecretArn: 'arn:aws:secretsmanager:eu-west-2:123456789012:secret:sess-abc',
+      jwksUri: 'https://admin.shop.example.com/.well-known/jwks.json',
+      issuer: 'https://admin.shop.example.com',
+      audience: 'https://admin.shop.example.com',
+      webIdentityOidcProviderArn:
+        'arn:aws:iam::123456789012:oidc-provider/admin.shop.example.com',
     },
   });
 
@@ -86,17 +90,38 @@ describe('PermissionsAdmin', () => {
     expect(patterns).toContain('/admin/*');
   });
 
-  test('grants the Lambda access to each injected table (R16)', () => {
+  test('store access is via an assumed estate role, not standing Lambda grants (R16, two-token model)', () => {
     const t = synth().template;
-    // The management role has DynamoDB item/query actions in some policy.
+    // A management role trusted by the consumer's OIDC provider via web identity.
+    const roles = t.findResources('AWS::IAM::Role');
+    const mgmtRole = Object.values(roles).find((r: any) =>
+      JSON.stringify(r.Properties.AssumeRolePolicyDocument).includes('sts:AssumeRoleWithWebIdentity'));
+    expect(mgmtRole).toBeDefined();
+    expect(JSON.stringify((mgmtRole as any).Properties.AssumeRolePolicyDocument))
+      .toContain('oidc-provider/admin.shop.example.com');
+
+    // That role carries the DynamoDB authority-table grants.
     const policies = t.findResources('AWS::IAM::Policy');
     const anyDdb = Object.values(policies).some((p: any) =>
       JSON.stringify(p.Properties.PolicyDocument).includes('dynamodb:PutItem'));
     expect(anyDdb).toBe(true);
-    // And a GetSecretValue grant on the session secret.
+
+    // HMAC is edge-only: the management plane reads NO Secrets Manager secret.
     const anySecret = Object.values(policies).some((p: any) =>
       JSON.stringify(p.Properties.PolicyDocument).includes('secretsmanager:GetSecretValue'));
-    expect(anySecret).toBe(true);
+    expect(anySecret).toBe(false);
+  });
+
+  test('the management Lambda is configured for RS256/JWKS authN, not HMAC', () => {
+    const t = synth().template;
+    const fns = t.findResources('AWS::Lambda::Function');
+    const env = Object.values(fns)
+      .map((f: any) => f.Properties.Environment?.Variables ?? {})
+      .find((v: any) => 'JWKS_URI' in v);
+    expect(env).toBeDefined();
+    expect(env.JWKS_URI).toBe('https://admin.shop.example.com/.well-known/jwks.json');
+    expect(env.MANAGEMENT_ROLE_ARN).toBeDefined();
+    expect('SESSION_HMAC_SECRET_ARN' in env).toBe(false);
   });
 
   test('no synthesized resource name or prop contains a consumer domain term (R7.3)', () => {
