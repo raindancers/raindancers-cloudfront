@@ -28,7 +28,7 @@ function table(stack: core.Stack, id: string): dynamodb.ITable {
   });
 }
 
-function synth(): { template: Template; stack: core.Stack } {
+function synth(opts: { standalone?: boolean } = {}): { template: Template; stack: core.Stack } {
   const app = new core.App();
   const stack = new core.Stack(app, 'PAStack', { env: { account: '123456789012', region: 'eu-west-2' } });
 
@@ -39,8 +39,9 @@ function synth(): { template: Template; stack: core.Stack } {
 
   new PermissionsAdmin(stack, 'Admin', {
     domainName: 'shop.example.com',
-    distribution,
-    assetBucket: bucket,
+    // Single-stack mode wires the distribution + bucket; standalone omits both
+    // so the construct builds only the regional API half.
+    ...(opts.standalone ? {} : { distribution, assetBucket: bucket }),
     pathPrefix: 'admin',
     catalogue: { permissions: [{ id: 'content.write', name: 'Write content' }] },
     predefinedRoles: [{ id: 'editor', name: 'Editor', permissionIds: ['content.write'], bit: 0 }],
@@ -128,5 +129,55 @@ describe('PermissionsAdmin', () => {
     const json = JSON.stringify(synth().template.toJSON());
     expect(json.toLowerCase()).not.toContain('brand');
     expect(json.toLowerCase()).not.toContain('subject');
+  });
+
+  test('standalone mode (no distribution) builds the regional API with no CloudFront wiring', () => {
+    const t = synth({ standalone: true }).template;
+    // The regional half still stands up.
+    t.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
+    t.hasResourceProperties('AWS::Lambda::Function', { Runtime: 'python3.12' });
+    // The assumed estate role + its DynamoDB grants are unchanged.
+    const roles = t.findResources('AWS::IAM::Role');
+    const mgmtRole = Object.values(roles).find((r: any) =>
+      JSON.stringify(r.Properties.AssumeRolePolicyDocument).includes('sts:AssumeRoleWithWebIdentity'));
+    expect(mgmtRole).toBeDefined();
+    // The construct mounts NOTHING on CloudFront and deploys NO SPA — the
+    // consumer owns both in the distribution's own stack.
+    const dists = t.findResources('AWS::CloudFront::Distribution');
+    const withBehaviors = Object.values(dists).some((d: any) =>
+      (d.Properties.DistributionConfig.CacheBehaviors || []).length > 0);
+    expect(withBehaviors).toBe(false);
+    t.resourceCountIs('Custom::CDKBucketDeployment', 0);
+  });
+
+  test('supplying exactly one of distribution / assetBucket is a wiring error', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'Bad', { env: { account: '123456789012', region: 'eu-west-2' } });
+    const bucket = new s3.Bucket(stack, 'B');
+    const base = {
+      domainName: 'shop.example.com',
+      catalogue: { permissions: [{ id: 'content.write', name: 'Write content' }] },
+      predefinedRoles: [{ id: 'editor', name: 'Editor', permissionIds: ['content.write'], bit: 0 }],
+      rightsActLockout: ['danger.superuser'],
+      scopeDimension: { label: 'scope', source: { type: 'STATIC' as any, staticScopeIds: ['a'] }, estateLevelPermissionIds: [] },
+      managementPermissions: {
+        createRole: 'm',
+        deleteRole: 'm',
+        listRoles: 'm',
+        createAssignment: 'm',
+        deleteAssignment: 'm',
+        listAssignments: 'm',
+      },
+      roleTable: table(stack, 'R'),
+      assignmentTable: table(stack, 'A'),
+      bitRegistryTable: table(stack, 'Bit'),
+      callerIdentity: {
+        jwksUri: 'https://x/.well-known/jwks.json',
+        webIdentityOidcProviderArn: 'arn:aws:iam::123456789012:oidc-provider/x',
+      },
+    } as any;
+    // assetBucket without distribution -> throws.
+    expect(() => new PermissionsAdmin(stack, 'Bad', { ...base, assetBucket: bucket }))
+      .toThrow(/must be supplied together|both omitted/);
   });
 });

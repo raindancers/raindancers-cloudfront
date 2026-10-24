@@ -14,6 +14,11 @@ injected:
 ```ts
 new PermissionsAdmin(this, 'Admin', {
   domainName,
+  // OPTIONAL — single-stack mode. Supply BOTH to have the construct mount
+  // /admin/api/* + /admin/* on the distribution and deploy the SPA. OMIT BOTH
+  // for standalone mode (distribution in another stack/region): the construct
+  // then builds only the regional API half and exposes `apiDomainName` for the
+  // consumer to wire the behaviour itself (see "Standalone mode" below).
   distribution,            // the consumer's existing CloudFront distribution
   assetBucket,             // the consumer's existing asset bucket
   pathPrefix: 'admin',     // SPA under /admin/*, API under /admin/api/*
@@ -25,12 +30,26 @@ new PermissionsAdmin(this, 'Admin', {
   managementPermissions,   // which permission gates each admin op
 
   roleTable, assignmentTable, bitRegistryTable, // injected DynamoDB store refs
-  callerIdentity: { sessionHmacSecretArn },      // verifies the session cookie
+  // AuthN: verify the caller's RS256 web_identity token against the JWKS. HMAC
+  // is the CloudFront edge's concern and is never used behind it (#54/#55).
+  callerIdentity: { jwksUri, issuer, audience, webIdentityOidcProviderArn },
 });
 ```
 
-The **regional management Lambda is the sole enforcement point**: it HMAC-checks
-the session cookie, gates each op by its `managementPermissions` entry, and
+### Standalone mode (distribution in another stack / region)
+
+Omit `distribution` and `assetBucket` and the construct builds only the regional
+half — the management Lambda, HTTP API, the estate management role (trust pinned
+to the **local** OIDC provider), and the table access — and exposes
+`apiDomainName`. The consumer owns the CloudFront behaviour and SPA hosting in
+the distribution's own stack. This is the path when CloudFront's cert stack
+(us-east-1) fronts a management API that lives in the workload region beside its
+OIDC provider: publish `apiDomainName` to the distribution's region via a named
+SSM parameter and read it there as an `HttpOrigin` — no cross-region references.
+Supplying exactly one of the pair is a wiring error.
+
+The **regional management Lambda is the sole enforcement point**: it
+RS256-verifies the caller's `web_identity` token against the JWKS, gates each op by its `managementPermissions` entry, and
 enforces no-escalation, rights-act lockout, immutable predefined roles, and
 archive-not-delete server-side, owning the custom-role bit registry and an
 actor-stamped audit trail. The bundled SPA reflects the caller's own permissions
