@@ -129,9 +129,33 @@ export interface PermissionsAdminProps {
   /** Canonical domain, for default resource names (as CognitoSessionBackend). */
   readonly domainName: string;
 
-  /** The consumer's existing CloudFront distribution and asset bucket. */
-  readonly distribution: cloudfront.IDistribution;
-  readonly assetBucket: s3.IBucket;
+  /**
+   * The consumer's existing CloudFront distribution.
+   *
+   * OPTIONAL. When supplied, the construct mounts two behaviours on it —
+   * `/<prefix>/api/*` -> the HTTP API, and `/<prefix>/*` -> the SPA bucket —
+   * i.e. the single-stack convenience path, where the distribution lives in the
+   * SAME stack as this construct.
+   *
+   * OMIT it when the distribution lives in a DIFFERENT stack or region from the
+   * management API (e.g. CloudFront's us-east-1 cert stack vs a regional API):
+   * the construct then builds only the regional half (Lambda, HTTP API, role,
+   * table access) and exposes {@link PermissionsAdmin.apiDomainName}. The
+   * consumer mounts the `/<prefix>/api/*` behaviour itself in the
+   * distribution's own stack — typically by publishing `apiDomainName` to the
+   * distribution's region via a named SSM parameter and reading it region-
+   * locally as an `HttpOrigin` (no cross-region references).
+   */
+  readonly distribution?: cloudfront.IDistribution;
+  /**
+   * The SPA asset bucket.
+   *
+   * REQUIRED when {@link distribution} is supplied (the construct deploys the
+   * bundled SPA into it and serves it through that distribution). OMIT it in
+   * standalone mode along with `distribution`: the consumer owns SPA hosting in
+   * the distribution's own stack. Supplying one without the other is rejected.
+   */
+  readonly assetBucket?: s3.IBucket;
   /** Path prefix the admin SPA + API mount under. @default 'admin' */
   readonly pathPrefix?: string;
 
@@ -163,8 +187,21 @@ export interface PermissionsAdminProps {
 
 /**
  * `PermissionsAdmin` — the write side of a reusable `(role, scope, assignment)`
- * authority model: a bundled admin SPA plus a regional management API, served
- * through the consumer's existing CloudFront distribution under a path prefix.
+ * authority model: a bundled admin SPA plus a regional management API.
+ *
+ * TWO MOUNTING MODES:
+ *  - SINGLE-STACK (supply `distribution` + `assetBucket`): the construct mounts
+ *    `/<prefix>/api/*` -> the HTTP API and `/<prefix>/*` -> the SPA bucket on
+ *    the distribution, and deploys the bundled SPA. Use when the distribution
+ *    lives in the same stack.
+ *  - STANDALONE (omit both): the construct builds ONLY the regional half
+ *    (Lambda, HTTP API, estate role, table access) and exposes `apiDomainName`.
+ *    Use when the distribution is in a different stack/region (e.g. CloudFront's
+ *    us-east-1 cert stack fronting a Sydney-regional API): the consumer
+ *    publishes `apiDomainName` to the distribution's region via SSM and wires
+ *    the `/<prefix>/api/*` `HttpOrigin` + SPA hosting there (no cross-region
+ *    references). This keeps the estate role's trust policy pinned to a LOCAL
+ *    OIDC provider rather than a cross-region one.
  *
  * The construct is DOMAIN-NEUTRAL (R7): it names no consumer concept. The
  * consumer injects the permission catalogue, predefined roles, scope dimension,
@@ -189,6 +226,14 @@ export class PermissionsAdmin extends constructs.Construct {
   public readonly managementRole: core.aws_iam.Role;
   /** The regional HTTP API fronting the management Lambda. */
   public readonly httpApi: apigwv2.HttpApi;
+  /**
+   * The HTTP API's bare host (no scheme, no path), e.g.
+   * `abc123.execute-api.ap-southeast-2.amazonaws.com`. In standalone mode
+   * (no {@link PermissionsAdminProps.distribution}) the consumer publishes this
+   * to the distribution's region via SSM and wires it as the `/<prefix>/api/*`
+   * `HttpOrigin` there. Also set in single-stack mode, for symmetry.
+   */
+  public readonly apiDomainName: string;
   /** The path prefix the SPA + API mount under. */
   public readonly pathPrefix: string;
 
@@ -304,37 +349,62 @@ export class PermissionsAdmin extends constructs.Construct {
     });
     this.httpApi = httpApi;
 
-    // --- CloudFront behaviours: /<prefix>/api/* -> HTTP API, /<prefix>/* -> S3 -
+    // The HTTP API's bare host, exposed so a standalone consumer can publish it
+    // (e.g. to the distribution's region via SSM) and wire the `/<prefix>/api/*`
+    // behaviour itself. Always set.
     const apiDomain = core.Fn.select(2, core.Fn.split('/', httpApi.apiEndpoint));
-    (props.distribution as cloudfront.Distribution).addBehavior?.(
-      `/${pathPrefix}/api/*`,
-      new origins.HttpOrigin(apiDomain),
-      {
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-        originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-      },
-    );
-    (props.distribution as cloudfront.Distribution).addBehavior?.(
-      `/${pathPrefix}/*`,
-      origins.S3BucketOrigin.withOriginAccessControl(props.assetBucket),
-      {
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-      },
-    );
+    this.apiDomainName = apiDomain;
 
-    // --- bundled admin SPA under /<prefix>/ (R9, R14) ------------------------
-    // Pre-built minimal static assets (no npm build at synth): bundled, served
-    // from the injected bucket under the prefix, through the injected
-    // distribution. The SPA reflects the caller's own permissions and hides
-    // actions they lack — it enforces nothing (R9.3).
-    new s3deploy.BucketDeployment(this, 'SpaDeployment', {
-      sources: [s3deploy.Source.asset(path.join(__dirname, 'permissions-admin-spa'))],
-      destinationBucket: props.assetBucket,
-      destinationKeyPrefix: `${pathPrefix}/`,
-      distribution: props.distribution,
-      distributionPaths: [`/${pathPrefix}/*`],
-    });
+    // --- CloudFront wiring: single-stack convenience ONLY --------------------
+    // When `distribution` is supplied, the construct mounts the two behaviours
+    // and deploys the SPA into the bucket — the single-stack path. When it is
+    // omitted (standalone/cross-region mode) the construct builds only the
+    // regional half above; the consumer mounts `/<prefix>/api/*` and owns SPA
+    // hosting in the distribution's own stack, using `apiDomainName`.
+    //
+    // `assetBucket` is meaningful only alongside `distribution` (the SPA is
+    // deployed into it AND served through that distribution), so the two are
+    // paired: supplying exactly one is a wiring error and is rejected.
+    if (Boolean(props.distribution) !== Boolean(props.assetBucket)) {
+      throw new Error(
+        'PermissionsAdmin: `distribution` and `assetBucket` must be supplied together ' +
+        '(single-stack mode) or both omitted (standalone mode, consumer owns the ' +
+        'CloudFront behaviour + SPA hosting and reads `apiDomainName`).',
+      );
+    }
+    if (props.distribution && props.assetBucket) {
+      const assetBucket = props.assetBucket;
+      // --- CloudFront behaviours: /<prefix>/api/* -> HTTP API, /<prefix>/* -> S3 -
+      (props.distribution as cloudfront.Distribution).addBehavior?.(
+        `/${pathPrefix}/api/*`,
+        new origins.HttpOrigin(apiDomain),
+        {
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+        },
+      );
+      (props.distribution as cloudfront.Distribution).addBehavior?.(
+        `/${pathPrefix}/*`,
+        origins.S3BucketOrigin.withOriginAccessControl(assetBucket),
+        {
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        },
+      );
+
+      // --- bundled admin SPA under /<prefix>/ (R9, R14) ------------------------
+      // Pre-built minimal static assets (no npm build at synth): bundled, served
+      // from the injected bucket under the prefix, through the injected
+      // distribution. The SPA reflects the caller's own permissions and hides
+      // actions they lack — it enforces nothing (R9.3).
+      new s3deploy.BucketDeployment(this, 'SpaDeployment', {
+        sources: [s3deploy.Source.asset(path.join(__dirname, 'permissions-admin-spa'))],
+        destinationBucket: assetBucket,
+        destinationKeyPrefix: `${pathPrefix}/`,
+        distribution: props.distribution,
+        distributionPaths: [`/${pathPrefix}/*`],
+      });
+    }
   }
 }
