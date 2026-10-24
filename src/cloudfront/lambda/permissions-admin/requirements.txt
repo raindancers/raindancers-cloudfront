@@ -1,2 +1,6 @@
-# The management Lambda uses only the AWS Lambda Python runtime's provided
-# libraries (boto3, botocore). No third-party dependencies are vendored.
+# The management Lambda verifies the caller's RS256 `web_identity` token against
+# the consumer's published JWKS (the two-token model — HMAC lives ONLY at the
+# CloudFront edge, never here). PyJWT + cryptography do the RS256/JWKS
+# verification; both are vendored at bundle time (pip install -r). boto3/botocore
+# come from the Lambda runtime.
+PyJWT[crypto]==2.8.0
