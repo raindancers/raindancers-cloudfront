@@ -70,7 +70,7 @@ def _sts():
     return _STS
 
 
-def resolve_held_via_resolver(sub):
+def resolve_held_via_resolver(sub, username=None):
     """Resolve the caller's HELD permissions via the optional external authority
     resolver (ADR-0003.2). The construct is authority-agnostic: the consumer's
     resolver Lambda owns how a subject's held permissions are computed, which is
@@ -96,7 +96,7 @@ def resolve_held_via_resolver(sub):
     resp = client.invoke(
         FunctionName=arn,
         InvocationType='RequestResponse',
-        Payload=json.dumps({'sub': sub}).encode('utf-8'),
+        Payload=json.dumps({'sub': sub, 'username': username}).encode('utf-8'),
     )
     if resp.get('FunctionError'):
         raise RuntimeError(f'resolver FunctionError: {resp.get("FunctionError")}')
@@ -495,7 +495,7 @@ def handler(event, context):
     # ADR-0003.2); otherwise fall back to the token claim (no regression). A
     # resolver failure is fail-closed (403), never a silent empty set.
     try:
-        resolved = resolve_held_via_resolver(actor)
+        resolved = resolve_held_via_resolver(actor, claims.get('preferred_username'))
     except Exception as exc:
         logger.error(f'resolve_held_via_resolver failed: {type(exc).__name__}: {exc}')
         return _response(403, {'error': 'permission_resolution_failed'})
