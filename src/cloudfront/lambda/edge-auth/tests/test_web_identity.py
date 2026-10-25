@@ -108,6 +108,36 @@ class WebIdentityTests(unittest.TestCase):
         self.assertIn('n', jwk)
         self.assertIn('e', jwk)
 
+    def test_openid_configuration_document(self):
+        # STS AssumeRoleWithWebIdentity discovers the jwks_uri from this doc;
+        # without it STS fails with InvalidIdentityTokenException.
+        config = {
+            'web_identity_signing_key_id': 'key-1',
+            'web_identity_issuer': 'https://admin.example.com',
+        }
+        resp = wi.openid_configuration_document(config)
+        self.assertEqual(resp['status'], '200')
+        self.assertEqual(
+            resp['headers']['content-type'][0]['value'], 'application/json')
+        doc = json.loads(resp['body'])
+        self.assertEqual(doc['issuer'], 'https://admin.example.com')
+        self.assertEqual(
+            doc['jwks_uri'], 'https://admin.example.com/.well-known/jwks.json')
+        self.assertEqual(doc['id_token_signing_alg_values_supported'], ['RS256'])
+        self.assertEqual(doc['response_types_supported'], ['id_token'])
+        self.assertEqual(doc['subject_types_supported'], ['public'])
+
+    def test_openid_configuration_trailing_slash_issuer(self):
+        # A trailing slash on the issuer must not double up in jwks_uri.
+        config = {
+            'web_identity_signing_key_id': 'key-1',
+            'web_identity_issuer': 'https://admin.example.com/',
+        }
+        doc = json.loads(wi.openid_configuration_document(config)['body'])
+        self.assertEqual(doc['issuer'], 'https://admin.example.com')
+        self.assertEqual(
+            doc['jwks_uri'], 'https://admin.example.com/.well-known/jwks.json')
+
 
 if __name__ == '__main__':
     unittest.main()

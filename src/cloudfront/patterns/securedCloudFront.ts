@@ -444,6 +444,19 @@ def get_config():
           }],
           cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
         };
+        // OIDC discovery document — sts:AssumeRoleWithWebIdentity GETs this to
+        // find the issuer's jwks_uri before validating the token. Routed to the
+        // same EdgeFunction (it dispatches /.well-known/openid-configuration);
+        // cacheable like the JWKS.
+        additionalBehaviors['/.well-known/openid-configuration'] = {
+          origin: props.defaultBehavior.origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          edgeLambdas: [{
+            functionVersion: oauthCallbackFunction.currentVersion,
+            eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+          }],
+          cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        };
       }
     }
 

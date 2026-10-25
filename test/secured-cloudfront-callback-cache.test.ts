@@ -151,4 +151,37 @@ describe('SecuredCloudFront OAuth callback caching', () => {
       expect(content).not.toContain('Token[');
     }
   });
+
+  test('web-identity on: the distribution serves /.well-known/openid-configuration for STS discovery', () => {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'WiDiscoveryStack', {
+      env: { account: '111111111111', region: 'us-east-1' },
+    });
+    const certificate = acm.Certificate.fromCertificateArn(
+      stack,
+      'Cert',
+      'arn:aws:acm:us-east-1:111111111111:certificate/00000000-0000-0000-0000-000000000000',
+    );
+    new SecuredCloudFront(stack, 'Secured', {
+      defaultBehavior: { origin: new origins.HttpOrigin('origin.example.com') },
+      domainNames: ['payload.example.com'],
+      certificate: certificate,
+      authSsmParamPrefix: '/auth/test',
+      authRegion: 'ap-southeast-2',
+      enableUserInfoInjection: false,
+      enableWebIdentityToken: true,
+      webIdentityIssuer: 'https://payload.example.com',
+    });
+
+    const template = Template.fromStack(stack);
+    // STS AssumeRoleWithWebIdentity GETs <issuer>/.well-known/openid-configuration
+    // to discover the jwks_uri; the behaviour must exist on the distribution.
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        CacheBehaviors: Match.arrayWith([
+          Match.objectLike({ PathPattern: '/.well-known/openid-configuration' }),
+        ]),
+      }),
+    });
+  });
 });

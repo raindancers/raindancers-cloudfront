@@ -66,6 +66,37 @@ def jwks_document(config, key_region):
     }
 
 
+def openid_configuration_document(config):
+    """Serve the OIDC discovery document for the web-identity issuer.
+
+    `sts:AssumeRoleWithWebIdentity` validates the token by discovering the
+    issuer's keys: it GETs `<issuer>/.well-known/openid-configuration`, reads
+    `jwks_uri`, then fetches that JWKS. Serving only `jwks.json` is not enough —
+    without this document STS fails discovery with InvalidIdentityTokenException.
+
+    The issuer is a self-issued provider (iss == aud), so the document advertises
+    only what STS web-identity federation requires: the issuer, its jwks_uri, and
+    the RS256 id_token signing algorithm. Returns a CloudFront-shaped response.
+    """
+    issuer = config['web_identity_issuer'].rstrip('/')
+    doc = {
+        'issuer': issuer,
+        'jwks_uri': issuer + '/.well-known/jwks.json',
+        'response_types_supported': ['id_token'],
+        'subject_types_supported': ['public'],
+        'id_token_signing_alg_values_supported': ['RS256'],
+    }
+    return {
+        'status': '200',
+        'statusDescription': 'OK',
+        'headers': {
+            'content-type': [{'key': 'Content-Type', 'value': 'application/json'}],
+            'cache-control': [{'key': 'Cache-Control', 'value': 'public, max-age=3600'}],
+        },
+        'body': json.dumps(doc),
+    }
+
+
 def _public_jwk(key_id, key_region):
     """Fetch + cache the KMS asymmetric public key as a JWK (RS256, use=sig)."""
     if key_id in _PUBLIC_KEY_CACHE:

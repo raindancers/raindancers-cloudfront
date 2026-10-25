@@ -242,6 +242,23 @@ def lambda_handler(event, context):
             logger.error(f'JWKS: failed to build document: {e}')
             return {'status': '500', 'statusDescription': 'Internal Server Error', 'body': 'JWKS unavailable'}
 
+    # OIDC discovery document — STS AssumeRoleWithWebIdentity discovers the
+    # issuer's jwks_uri from here before validating the token. Served alongside
+    # the JWKS; same feature gate.
+    if uri.endswith('/.well-known/openid-configuration'):
+        try:
+            cfg = get_config_cached()
+        except Exception as e:
+            logger.error(f'OIDC discovery: failed to load configuration: {e}')
+            return {'status': '500', 'statusDescription': 'Internal Server Error', 'body': 'Configuration error'}
+        if not web_identity.is_enabled(cfg):
+            return {'status': '404', 'statusDescription': 'Not Found', 'body': 'Not found'}
+        try:
+            return web_identity.openid_configuration_document(cfg)
+        except Exception as e:
+            logger.error(f'OIDC discovery: failed to build document: {e}')
+            return {'status': '500', 'statusDescription': 'Internal Server Error', 'body': 'Discovery document unavailable'}
+
     # Debug logging for cookies
     logger.info(f'Request headers: {json.dumps(request.get("headers", {}))}')
     
