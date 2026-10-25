@@ -94,6 +94,34 @@ class WebIdentityTests(unittest.TestCase):
         payload = _b64url_json(token.split('.')[1])
         self.assertNotIn(claim, payload)
 
+    def test_mint_adds_preferred_username_when_given(self):
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        # username provided -> preferred_username claim present, sub unchanged.
+        token = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='user-sub',
+            principal_tags_claim=None, principal_tags_value=None,
+            ttl_exp=9999999999, username='u@x.com',
+        )
+        payload = _b64url_json(token.split('.')[1])
+        self.assertEqual(payload['preferred_username'], 'u@x.com')
+        self.assertEqual(payload['sub'], 'user-sub')
+
+    def test_mint_omits_preferred_username_when_absent(self):
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        # default (None) and empty string both omit the claim.
+        token_default = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='user-sub',
+            principal_tags_claim=None, principal_tags_value=None,
+            ttl_exp=9999999999,
+        )
+        token_empty = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='user-sub',
+            principal_tags_claim=None, principal_tags_value=None,
+            ttl_exp=9999999999, username='',
+        )
+        self.assertNotIn('preferred_username', _b64url_json(token_default.split('.')[1]))
+        self.assertNotIn('preferred_username', _b64url_json(token_empty.split('.')[1]))
+
     def test_jwks_document_single_rsa_jwk(self):
         config = {'web_identity_signing_key_id': 'key-1'}
         resp = wi.jwks_document(config, 'ap-southeast-2')

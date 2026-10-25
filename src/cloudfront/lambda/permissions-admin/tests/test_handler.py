@@ -286,7 +286,7 @@ class PermissionsAdminTests(unittest.TestCase):
         # resolver returns {mgmt.role.list, content.write}, so the caller can
         # list (reflect shows it) yet an op needing a perm the resolver did NOT
         # return (mgmt.role.create) is denied. (tearDown restores the real fn.)
-        index.resolve_held_via_resolver = lambda sub: {'mgmt.role.list', 'content.write'}
+        index.resolve_held_via_resolver = lambda *a, **k: {'mgmt.role.list', 'content.write'}
         reflect = index.handler(_event('GET', 'reflect', permissions=[]), None)
         self.assertEqual(reflect['statusCode'], 200)
         ops = json.loads(reflect['body'])['operations']
@@ -301,7 +301,7 @@ class PermissionsAdminTests(unittest.TestCase):
     def test_resolver_failure_fails_closed_403(self):
         # A resolver failure is fail-closed: 403 permission_resolution_failed,
         # never a silent empty set that would deny-everything-as-if-authorized.
-        def boom(sub):
+        def boom(*a, **k):
             raise RuntimeError('resolver unreachable')
         index.resolve_held_via_resolver = boom
         resp = index.handler(_event('GET', 'reflect', permissions=['mgmt.role.list']), None)
@@ -311,10 +311,34 @@ class PermissionsAdminTests(unittest.TestCase):
     def test_resolver_none_falls_back_to_claim(self):
         # When the resolver returns None (no resolver configured) the handler
         # falls back to the token claim — the no-regression path.
-        index.resolve_held_via_resolver = lambda sub: None
+        index.resolve_held_via_resolver = lambda *a, **k: None
         resp = index.handler(_event('GET', 'reflect', permissions=['mgmt.role.list']), None)
         self.assertEqual(resp['statusCode'], 200)
         self.assertTrue(json.loads(resp['body'])['operations']['listRoles'])
+
+    def test_resolver_receives_preferred_username_from_claim(self):
+        # The handler forwards the token's preferred_username claim to the
+        # resolver as the username arg (so the consumer can do the SCIM lookup
+        # by UPN, since `sub` is an opaque Entra pairwise id). (#64)
+        captured = {}
+
+        def capture(sub, username=None):
+            captured['sub'] = sub
+            captured['username'] = username
+            return {'mgmt.role.list'}
+        index.resolve_held_via_resolver = capture
+
+        claims = {'sub': 'pairwise-abc', 'preferred_username': 'op@x.com',
+                  'permissions': [], 'exp': int(time.time()) + 3600}
+        ev = {
+            'requestContext': {'http': {'method': 'GET', 'path': '/admin/api/reflect'}},
+            'headers': {'cookie': '__Host-web_identity=' + json.dumps(claims)},
+            'body': None,
+        }
+        resp = index.handler(ev, None)
+        self.assertEqual(resp['statusCode'], 200)
+        self.assertEqual(captured['sub'], 'pairwise-abc')
+        self.assertEqual(captured['username'], 'op@x.com')
 
 
 if __name__ == '__main__':

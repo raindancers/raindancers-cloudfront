@@ -737,6 +737,7 @@ def lambda_handler(event, context):
                     principal_tags_claim=PRINCIPAL_TAGS_CLAIM,
                     principal_tags_value=session_payload.get(PRINCIPAL_TAGS_CLAIM),
                     ttl_exp=azure_exp_timestamp,
+                    username=payload.get('preferred_username'),
                 )
                 web_identity_cookie = (
                     f'{cookie_prefix}web_identity={wi_token}; '

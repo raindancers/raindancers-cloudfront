@@ -120,7 +120,7 @@ def _public_jwk(key_id, key_region):
     return jwk
 
 
-def mint_web_identity_token(config, key_region, subject, principal_tags_claim, principal_tags_value, ttl_exp):
+def mint_web_identity_token(config, key_region, subject, principal_tags_claim, principal_tags_value, ttl_exp, username=None):
     """Mint a horton-signed RS256 web-identity JWT via KMS kms:Sign.
 
     - subject: the operator `sub` (same identity as the session cookie).
@@ -128,6 +128,9 @@ def mint_web_identity_token(config, key_region, subject, principal_tags_claim, p
       encoded `:k=v:` value (the SAME value stamped on the HMAC cookie), so the
       brand tag the two tokens carry can never disagree. Omitted when empty.
     - ttl_exp: absolute `exp` (unix), matched to the session cookie's expiry.
+    - username: optional operator UPN (preferred_username) for SCIM resolution;
+      added as the `preferred_username` claim when a non-empty string. `sub` is
+      left unchanged (an opaque Entra pairwise id) so audit/trust are unaffected.
 
     Returns the compact JWS string. The caller delivers it to the client.
     """
@@ -146,6 +149,8 @@ def mint_web_identity_token(config, key_region, subject, principal_tags_claim, p
     }
     if principal_tags_claim and principal_tags_value:
         payload[principal_tags_claim] = principal_tags_value
+    if isinstance(username, str) and username:
+        payload['preferred_username'] = username
     signing_input = (
         _b64url(json.dumps(header, separators=(',', ':')).encode())
         + '.'
