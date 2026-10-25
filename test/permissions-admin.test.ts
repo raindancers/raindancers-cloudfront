@@ -5,6 +5,7 @@ import {
   aws_cloudfront as cloudfront,
   aws_cloudfront_origins as origins,
   aws_dynamodb as dynamodb,
+  aws_iam as iam,
   aws_s3 as s3,
 } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -179,5 +180,81 @@ describe('PermissionsAdmin', () => {
     // assetBucket without distribution -> throws.
     expect(() => new PermissionsAdmin(stack, 'Bad', { ...base, assetBucket: bucket }))
       .toThrow(/must be supplied together|both omitted/);
+  });
+
+  // Regression (horton S2): when the OIDC provider ARN is a TOKEN — the normal
+  // case for a standalone deployment co-located with an AuthInfrastructure that
+  // CREATES the provider in the same stack, so its ARN is a `Ref` — the trust
+  // condition key must still be a concrete string. The old code Fn.split the ARN
+  // to build `<host>:aud`, producing an Fn::Select TOKEN used as a MAP KEY, which
+  // CloudFormation rejects ("used as the key in a map so must resolve to a
+  // string"). The fix derives the host from the concrete `issuer` instead.
+  function synthWithTokenProvider(ci: { issuer?: string; audience?: string; trustedSubject?: string }) {
+    const app = new core.App();
+    const stack = new core.Stack(app, 'TokStack', { env: { account: '123456789012', region: 'eu-west-2' } });
+    // A REAL provider in this stack -> its ARN is a Ref token, not a literal.
+    const provider = new iam.OpenIdConnectProvider(stack, 'Oidc', {
+      url: 'https://admin.shop.example.com',
+      clientIds: ['https://admin.shop.example.com'],
+    });
+    new PermissionsAdmin(stack, 'Admin', {
+      domainName: 'shop.example.com',
+      catalogue: { permissions: [{ id: 'content.write', name: 'Write content' }] },
+      predefinedRoles: [{ id: 'editor', name: 'Editor', permissionIds: ['content.write'], bit: 0 }],
+      rightsActLockout: ['danger.superuser'],
+      scopeDimension: { label: 'scope', source: { type: 'STATIC' as any, staticScopeIds: ['a'] }, estateLevelPermissionIds: [] },
+      managementPermissions: {
+        createRole: 'm',
+        deleteRole: 'm',
+        listRoles: 'm',
+        createAssignment: 'm',
+        deleteAssignment: 'm',
+        listAssignments: 'm',
+      },
+      roleTable: table(stack, 'R'),
+      assignmentTable: table(stack, 'A'),
+      bitRegistryTable: table(stack, 'Bit'),
+      callerIdentity: {
+        jwksUri: 'https://admin.shop.example.com/.well-known/jwks.json',
+        webIdentityOidcProviderArn: provider.openIdConnectProviderArn, // TOKEN
+        ...ci,
+      },
+    });
+    return Template.fromStack(stack);
+  }
+
+  test('synthesizes with a TOKENIZED provider ARN and keys the trust condition on the concrete issuer host', () => {
+    const t = synthWithTokenProvider({
+      issuer: 'https://admin.shop.example.com',
+      audience: 'https://admin.shop.example.com',
+    });
+    const roles = t.findResources('AWS::IAM::Role');
+    const mgmtRole = Object.values(roles).find((r: any) =>
+      JSON.stringify(r.Properties.AssumeRolePolicyDocument).includes('sts:AssumeRoleWithWebIdentity'));
+    expect(mgmtRole).toBeDefined();
+    const doc = (mgmtRole as any).Properties.AssumeRolePolicyDocument;
+    const cond = JSON.stringify(doc.Statement[0].Condition);
+    // The condition KEY is the concrete issuer host (scheme stripped), not a token.
+    expect(cond).toContain('admin.shop.example.com:aud');
+    // The map key itself must be a plain string, never an Fn::Select/Fn::Join token.
+    const condKeys = Object.keys(doc.Statement[0].Condition.StringEquals);
+    expect(condKeys).toContain('admin.shop.example.com:aud');
+  });
+
+  test('keys :sub on the concrete issuer host too when trustedSubject is set', () => {
+    const t = synthWithTokenProvider({
+      issuer: 'https://admin.shop.example.com',
+      trustedSubject: 'operator@shop.example.com',
+    });
+    const roles = t.findResources('AWS::IAM::Role');
+    const mgmtRole = Object.values(roles).find((r: any) =>
+      JSON.stringify(r.Properties.AssumeRolePolicyDocument).includes('sts:AssumeRoleWithWebIdentity'));
+    const keys = Object.keys((mgmtRole as any).Properties.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals);
+    expect(keys).toContain('admin.shop.example.com:sub');
+  });
+
+  test('requires issuer when audience or trustedSubject is set (it supplies the concrete condition host)', () => {
+    expect(() => synthWithTokenProvider({ audience: 'https://admin.shop.example.com' }))
+      .toThrow(/issuer is required/);
   });
 });

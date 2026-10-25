@@ -95,7 +95,11 @@ export interface CallerIdentityConfig {
   readonly jwksUri: string;
   /**
    * Expected token issuer (`iss`). When set, the API rejects a token whose
-   * issuer differs. @default no issuer check
+   * issuer differs. ALSO supplies the OIDC provider host for the management
+   * role's trust-policy condition key (`<host>:aud`/`:sub`), so it is REQUIRED
+   * whenever {@link audience} or {@link trustedSubject} is set — a condition key
+   * is a map key and must be a concrete synth-time string (the provider ARN,
+   * which may be a token, cannot be split to derive it). @default no issuer check
    */
   readonly issuer?: string;
   /**
@@ -257,18 +261,35 @@ export class PermissionsAdmin extends constructs.Construct {
     // condition; the management-permission authZ in the Lambda is the gate on
     // WHO may write them.
     const oidcCondition: Record<string, Record<string, string>> = {};
-    if (props.callerIdentity.audience) {
-      // The OIDC provider URL without scheme is the condition key prefix AWS uses
-      // for aud/sub on AssumeRoleWithWebIdentity.
-      const providerHost = core.Fn.select(1, core.Fn.split('oidc-provider/', props.callerIdentity.webIdentityOidcProviderArn));
-      oidcCondition.StringEquals = { [`${providerHost}:aud`]: props.callerIdentity.audience };
-    }
-    if (props.callerIdentity.trustedSubject) {
-      oidcCondition.StringEquals = {
-        ...(oidcCondition.StringEquals ?? {}),
-        [`${core.Fn.select(1, core.Fn.split('oidc-provider/', props.callerIdentity.webIdentityOidcProviderArn))}:sub`]:
-          props.callerIdentity.trustedSubject,
-      };
+    if (props.callerIdentity.audience || props.callerIdentity.trustedSubject) {
+      // The condition key AWS uses for aud/sub on AssumeRoleWithWebIdentity is
+      // `<provider-url-without-scheme>:aud` / `:sub` — and that provider URL is
+      // the token ISSUER (the JWKS issuer == the OIDC provider url). Derive the
+      // key prefix from `issuer` (a CONCRETE synth-time string), NOT by
+      // Fn.split-ing the provider ARN: a condition key is a MAP KEY, and a map
+      // key must resolve to a plain string at synth. When the provider ARN is a
+      // token (e.g. a `Ref` to a provider created in the same stack — the normal
+      // case for a standalone deployment co-located with its AuthInfrastructure),
+      // splitting it yields an Fn::Select token, which CloudFormation refuses as
+      // a map key ("used as the key in a map so must resolve to a string"). The
+      // issuer is already concrete, so this both fixes that and is the same host.
+      if (!props.callerIdentity.issuer) {
+        throw new Error(
+          'callerIdentity.issuer is required when audience or trustedSubject is set: '
+          + 'it supplies the concrete OIDC provider host for the trust-policy condition key '
+          + '(`<host>:aud`/`:sub`), which must be a synth-time string, not a token.',
+        );
+      }
+      // Strip the URL scheme to get the bare host AWS keys the condition on.
+      const providerHost = props.callerIdentity.issuer.replace(/^https?:\/\//, '');
+      const conditions: Record<string, string> = {};
+      if (props.callerIdentity.audience) {
+        conditions[`${providerHost}:aud`] = props.callerIdentity.audience;
+      }
+      if (props.callerIdentity.trustedSubject) {
+        conditions[`${providerHost}:sub`] = props.callerIdentity.trustedSubject;
+      }
+      oidcCondition.StringEquals = conditions;
     }
     const managementRole = new core.aws_iam.Role(this, 'ManagementRole', {
       assumedBy: new core.aws_iam.WebIdentityPrincipal(
