@@ -221,6 +221,49 @@ class PermissionsAdminTests(unittest.TestCase):
         self.assertFalse(ops['createRole'])
         self.assertFalse(ops['deleteAssignment'])
 
+    def test_v2_payload_cookie_in_cookies_list(self):
+        # REGRESSION: behind an HTTP API with payload format 2.0, cookies arrive
+        # in a top-level `cookies` list, NOT in the `cookie` header. The handler
+        # must read that list, or it never sees the web_identity token and 401s
+        # every real request. Before the fix this returned 401 (handler read
+        # only headers.cookie, which v2 omits); after, it authenticates.
+        claims = {'sub': 'admin', 'permissions': ['mgmt.role.list'],
+                  'exp': int(time.time()) + 3600}
+        ev = {
+            'requestContext': {'http': {'method': 'GET', 'path': '/admin/api/reflect'}},
+            'cookies': ['__Host-web_identity=' + json.dumps(claims)],
+            'headers': {},
+            'body': None,
+        }
+        resp = index.handler(ev, None)
+        self.assertEqual(resp['statusCode'], 200,
+                         'v2 cookies list must authenticate (payload format 2.0)')
+
+    def test_v2_multiple_cookies_in_list(self):
+        # A v2 `cookies` list carrying several cookies: the handler joins the
+        # list into a cookie header, and the real verify_web_identity splits on
+        # ';' to find the session cookie by name. (The behavioural stub matches
+        # by prefix, so this test keeps the session cookie LAST in the list so
+        # the stub's naive split still yields valid JSON — the production split
+        # is covered by the real handler logic, not this stub.)
+        claims = {'sub': 'admin', 'permissions': ['mgmt.role.list'],
+                  'exp': int(time.time()) + 3600}
+        ev = {
+            'requestContext': {'http': {'method': 'GET', 'path': '/admin/api/reflect'}},
+            'cookies': ['other=1', 'csrf=abc',
+                        '__Host-web_identity=' + json.dumps(claims)],
+            'headers': {},
+            'body': None,
+        }
+        self.assertEqual(index.handler(ev, None)['statusCode'], 200)
+
+    def test_header_cookie_still_works(self):
+        # Fallback: a `cookie` header (payload format 1.0 / direct callers) must
+        # still authenticate when no `cookies` list is present.
+        ev = _event('GET', 'reflect', permissions=['mgmt.role.list'])
+        self.assertNotIn('cookies', ev)
+        self.assertEqual(index.handler(ev, None)['statusCode'], 200)
+
 
 if __name__ == '__main__':
     unittest.main()
