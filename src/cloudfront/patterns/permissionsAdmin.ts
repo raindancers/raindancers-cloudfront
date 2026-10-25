@@ -184,6 +184,21 @@ export interface PermissionsAdminProps {
   /** How the API authenticates the caller. */
   readonly callerIdentity: CallerIdentityConfig;
 
+  /**
+   * OPTIONAL external authority-resolver hook. When supplied, the management
+   * handler invokes this Lambda synchronously with `{"sub": "<caller-sub>"}`
+   * and expects `{"permissions": string[]}` (a bare `string[]` is also
+   * accepted) — the caller's HELD permissions. The construct stays authority-
+   * agnostic: the consumer (e.g. horton) owns how a subject's held permissions
+   * are resolved (ADR-0003.2), which is required because the web_identity token
+   * carries NO permissions by design.
+   *
+   * When UNSET the handler falls back to reading the held permissions from the
+   * token claims as before (no regression). On a resolver invocation failure
+   * the handler fails CLOSED (403), never silently empty.
+   */
+  readonly callerPermissionsResolver?: lambda.IFunction;
+
   /** Lambda log retention. @default RetentionDays.ONE_MONTH */
   readonly logRetention?: logs.RetentionDays;
   readonly removalPolicy?: core.RemovalPolicy;
@@ -349,9 +364,19 @@ export class PermissionsAdmin extends constructs.Construct {
         ESTATE_LEVEL_PERMS: JSON.stringify(props.scopeDimension.estateLevelPermissionIds),
         SCOPE_LABEL: props.scopeDimension.label,
         MANAGEMENT_PERMISSIONS: JSON.stringify(props.managementPermissions),
+        // Optional external authority resolver: when set, the handler invokes
+        // this Lambda to resolve the caller's held permissions instead of
+        // reading them from the token claim. Empty string = fall back to claim.
+        CALLER_PERMISSIONS_RESOLVER_ARN: props.callerPermissionsResolver?.functionArn ?? '',
       },
     });
     this.managementFunction = fn;
+
+    // Grant the handler permission to invoke the external authority resolver,
+    // when one is supplied. (Regional -> regional lambda:Invoke; fine.)
+    if (props.callerPermissionsResolver) {
+      props.callerPermissionsResolver.grantInvoke(fn);
+    }
 
     // The Lambda's OWN role gets NO table grants and NO secret read. Its only
     // added power is to assume the management role via web identity — which is a

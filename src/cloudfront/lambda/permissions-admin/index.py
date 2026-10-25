@@ -70,6 +70,56 @@ def _sts():
     return _STS
 
 
+def resolve_held_via_resolver(sub):
+    """Resolve the caller's HELD permissions via the optional external authority
+    resolver (ADR-0003.2). The construct is authority-agnostic: the consumer's
+    resolver Lambda owns how a subject's held permissions are computed, which is
+    required because the web_identity token carries no permissions by design.
+
+    Returns a `set` of permission ids, or `None` when no resolver is configured
+    (CALLER_PERMISSIONS_RESOLVER_ARN empty) so the handler falls back to the
+    token claim. Fails CLOSED: ANY invoke error, FunctionError, or malformed
+    payload raises RuntimeError rather than returning a silent empty set.
+    """
+    arn = os.environ.get('CALLER_PERMISSIONS_RESOLVER_ARN', '').strip()
+    if not arn:
+        return None
+
+    # arn:aws:lambda:<region>:<account>:function:<name>
+    parts = arn.split(':')
+    if len(parts) < 4 or not parts[3]:
+        raise RuntimeError(f'malformed resolver ARN: {arn!r}')
+    region = parts[3]
+
+    import boto3
+    client = boto3.client('lambda', region_name=region)
+    resp = client.invoke(
+        FunctionName=arn,
+        InvocationType='RequestResponse',
+        Payload=json.dumps({'sub': sub}).encode('utf-8'),
+    )
+    if resp.get('FunctionError'):
+        raise RuntimeError(f'resolver FunctionError: {resp.get("FunctionError")}')
+
+    payload_stream = resp.get('Payload')
+    raw = payload_stream.read() if payload_stream is not None else b''
+    try:
+        data = json.loads(raw or b'null')
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f'resolver returned non-JSON payload: {exc}')
+
+    if isinstance(data, dict):
+        perms = data.get('permissions')
+    elif isinstance(data, list):
+        perms = data
+    else:
+        raise RuntimeError(f'resolver payload not an object or list: {type(data).__name__}')
+
+    if not isinstance(perms, list) or not all(isinstance(p, str) for p in perms):
+        raise RuntimeError('resolver permissions is not a list of strings')
+    return set(perms)
+
+
 def assume_management_role(web_identity_token, actor):
     """Exchange the caller's RS256 `web_identity` token for the estate management
     role via sts:AssumeRoleWithWebIdentity, and return a DynamoDB resource bound
@@ -440,7 +490,16 @@ def handler(event, context):
     claims, web_identity_token = verified
 
     actor = claims.get('sub', '')
-    held = caller_permissions(claims)
+    # Resolve the caller's HELD permissions. When an external authority resolver
+    # is configured the construct delegates to it (the consumer owns authZ,
+    # ADR-0003.2); otherwise fall back to the token claim (no regression). A
+    # resolver failure is fail-closed (403), never a silent empty set.
+    try:
+        resolved = resolve_held_via_resolver(actor)
+    except Exception as exc:
+        logger.error(f'resolve_held_via_resolver failed: {type(exc).__name__}: {exc}')
+        return _response(403, {'error': 'permission_resolution_failed'})
+    held = resolved if resolved is not None else caller_permissions(claims)
 
     # Exchange the caller's token for the estate management role and bind every
     # table call in this request to those scoped credentials. The Lambda itself

@@ -98,6 +98,13 @@ class PermissionsAdminTests(unittest.TestCase):
     def setUp(self):
         self.ddb = FakeDdb()
 
+        # Preserve module attributes this suite monkeypatches, so tearDown can
+        # restore them (a `del` of a patched name would otherwise wipe the real
+        # function for every later test in the run).
+        self._orig_verify = index.verify_web_identity
+        self._orig_assume = index.assume_management_role
+        self._orig_resolve = index.resolve_held_via_resolver
+
         # Stub authN: decode the claims the test embedded in the cookie, or None
         # for the invalid-token case. No real RS256/JWKS in behavioural tests.
         def fake_verify(cookie_header):
@@ -130,6 +137,13 @@ class PermissionsAdminTests(unittest.TestCase):
             'ESTATE_LEVEL_PERMS': json.dumps([]),
             'SCOPE_LABEL': 'scope',
         })
+
+    def tearDown(self):
+        # Restore every monkeypatched module attribute (prevents a `del`/patch
+        # in one test from leaking into the next).
+        index.verify_web_identity = self._orig_verify
+        index.assume_management_role = self._orig_assume
+        index.resolve_held_via_resolver = self._orig_resolve
 
     def _audit_rows(self):
         return [v for v in self.ddb.Table('roles').items.values()
@@ -263,6 +277,44 @@ class PermissionsAdminTests(unittest.TestCase):
         ev = _event('GET', 'reflect', permissions=['mgmt.role.list'])
         self.assertNotIn('cookies', ev)
         self.assertEqual(index.handler(ev, None)['statusCode'], 200)
+
+    # --- external authority-resolver hook (#63) ------------------------------
+    def test_resolver_supplies_held_overriding_claim(self):
+        # When the external resolver is configured, the handler uses ITS result
+        # as the caller's held permissions, NOT the token claim. Here the token
+        # carries NO permissions (web_identity carries none by design) but the
+        # resolver returns {mgmt.role.list, content.write}, so the caller can
+        # list (reflect shows it) yet an op needing a perm the resolver did NOT
+        # return (mgmt.role.create) is denied. (tearDown restores the real fn.)
+        index.resolve_held_via_resolver = lambda sub: {'mgmt.role.list', 'content.write'}
+        reflect = index.handler(_event('GET', 'reflect', permissions=[]), None)
+        self.assertEqual(reflect['statusCode'], 200)
+        ops = json.loads(reflect['body'])['operations']
+        self.assertTrue(ops['listRoles'])   # resolved perm, despite empty claim
+        self.assertFalse(ops['createRole'])  # resolver did not grant it
+        # An op needing mgmt.role.create is denied (resolver set lacks it).
+        create = index.handler(_event('POST', 'roles',
+            body={'id': 'r1', 'name': 'R1', 'scopeId': 's1', 'permissionIds': []},
+            permissions=[]), None)
+        self.assertEqual(create['statusCode'], 403)
+
+    def test_resolver_failure_fails_closed_403(self):
+        # A resolver failure is fail-closed: 403 permission_resolution_failed,
+        # never a silent empty set that would deny-everything-as-if-authorized.
+        def boom(sub):
+            raise RuntimeError('resolver unreachable')
+        index.resolve_held_via_resolver = boom
+        resp = index.handler(_event('GET', 'reflect', permissions=['mgmt.role.list']), None)
+        self.assertEqual(resp['statusCode'], 403)
+        self.assertEqual(json.loads(resp['body'])['error'], 'permission_resolution_failed')
+
+    def test_resolver_none_falls_back_to_claim(self):
+        # When the resolver returns None (no resolver configured) the handler
+        # falls back to the token claim — the no-regression path.
+        index.resolve_held_via_resolver = lambda sub: None
+        resp = index.handler(_event('GET', 'reflect', permissions=['mgmt.role.list']), None)
+        self.assertEqual(resp['statusCode'], 200)
+        self.assertTrue(json.loads(resp['body'])['operations']['listRoles'])
 
 
 if __name__ == '__main__':
