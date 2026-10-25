@@ -296,7 +296,7 @@ export class PermissionsAdmin extends constructs.Construct {
         props.callerIdentity.webIdentityOidcProviderArn,
         Object.keys(oidcCondition).length ? oidcCondition : undefined,
       ),
-      description: `permissions-admin estate management role for ${props.domainName} — assumed per request via the caller's web_identity token`,
+      description: `permissions-admin estate management role for ${props.domainName} -- assumed per request via the caller's web_identity token`,
       maxSessionDuration: core.Duration.hours(1),
     });
     // Permission policy: exactly the three authority tables + the role-in-use GSI.

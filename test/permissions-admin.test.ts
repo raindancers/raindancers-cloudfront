@@ -257,4 +257,25 @@ describe('PermissionsAdmin', () => {
     expect(() => synthWithTokenProvider({ audience: 'https://admin.shop.example.com' }))
       .toThrow(/issuer is required/);
   });
+
+  test('the management role Description is within IAM\'s allowed charset (no deploy-time 400)', () => {
+    // REGRESSION GUARD: IAM validates a role Description server-side against
+    // [\u0009\u000A\u000D\u0020-\u007E\u00A1-\u00FF]* and rejects anything
+    // outside it with a 400 at CREATE time. CDK does NOT validate the charset
+    // locally, so synth + every template assertion pass while the deploy fails.
+    // The description previously contained an em-dash (U+2014, > U+00FF), which
+    // broke the first stand-up of this stack. Assert the rendered Description
+    // contains only IAM-legal characters.
+    const t = synth().template;
+    const roles = t.findResources('AWS::IAM::Role');
+    const mgmtRole = Object.values(roles).find((r: any) =>
+      JSON.stringify(r.Properties.AssumeRolePolicyDocument).includes('sts:AssumeRoleWithWebIdentity'),
+    ) as any;
+    const description: string = mgmtRole.Properties.Description;
+    expect(description).toBeDefined();
+    // IAM's own allowed-character pattern for a role description.
+    expect(description).toMatch(/^[\u0009\u000A\u000D\u0020-\u007E\u00A1-\u00FF]*$/);
+    // And specifically: no em-dash (the exact char that broke the deploy).
+    expect(description).not.toContain('\u2014');
+  });
 });
