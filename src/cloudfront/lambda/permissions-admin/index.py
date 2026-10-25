@@ -426,7 +426,15 @@ def handler(event, context):
     method, resource = _route(event)
 
     headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
-    verified = verify_web_identity(headers.get('cookie'))
+    # HTTP API payload format 2.0 delivers cookies in a top-level `cookies`
+    # list, NOT in the `cookie` header (format 1.0 / direct callers use the
+    # header). Read the v2 list first and fall back to the header so the handler
+    # authenticates under both payload formats.
+    cookie_header = headers.get('cookie')
+    event_cookies = event.get('cookies')
+    if not cookie_header and isinstance(event_cookies, list):
+        cookie_header = '; '.join(event_cookies)
+    verified = verify_web_identity(cookie_header)
     if not verified:
         return _response(401, {'error': 'invalid_session'})
     claims, web_identity_token = verified
