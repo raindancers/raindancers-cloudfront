@@ -264,6 +264,54 @@ class PermissionsAdminTests(unittest.TestCase):
         self.assertNotIn('cookies', ev)
         self.assertEqual(index.handler(ev, None)['statusCode'], 200)
 
+    # --- option A: held permissions resolved from assignments by sub ---------
+    def _assign(self, principal, role_id, scope_id='ESTATE'):
+        self.ddb.Table('assignments').put_item(Item={
+            'pk': f'PRINCIPAL#{principal}', 'sk': f'ROLE#{role_id}#SCOPE#{scope_id}',
+            'roleId': role_id, 'scopeId': scope_id, 'principal': principal,
+        })
+
+    def test_held_resolved_from_predefined_role_assignment(self):
+        # Token carries NO permissions claim. The operator is assigned the
+        # predefined 'editor' role (content.write). create_role requires
+        # mgmt.role.create which editor does NOT hold -> 403 missing permission,
+        # proving held came from the assignment, not the (absent) claim.
+        self._assign('alice', 'editor')
+        ev = _event('POST', 'roles',
+            body={'id': 'r1', 'name': 'R1', 'scopeId': 's1', 'permissionIds': []},
+            sub='alice', permissions=None)
+        resp = index.handler(ev, None)
+        self.assertEqual(resp['statusCode'], 403)
+        self.assertEqual(json.loads(resp['body'])['error'], 'missing_management_permission')
+        # reflect shows exactly the predefined role's permission set.
+        r = index.handler(_event('GET', 'reflect', sub='alice', permissions=None), None)
+        self.assertEqual(r['statusCode'], 200)
+        self.assertEqual(set(json.loads(r['body'])['permissions']), {'content.write'})
+
+    def test_held_resolved_from_custom_role_in_table(self):
+        # A custom role in the ROLE_TABLE grants its permissionIds by assignment.
+        self.ddb.Table('roles').put_item(Item={
+            'pk': 'ROLE#mgr', 'sk': 'ROLE#mgr', 'name': 'Mgr',
+            'permissionIds': ['mgmt.role.list', 'mgmt.role.create'], 'status': 'active',
+        })
+        self._assign('bob', 'mgr')
+        r = index.handler(_event('GET', 'reflect', sub='bob', permissions=None), None)
+        self.assertEqual(set(json.loads(r['body'])['permissions']),
+                         {'mgmt.role.list', 'mgmt.role.create'})
+        # And bob can now listRoles (needs mgmt.role.list).
+        self.assertEqual(
+            index.handler(_event('GET', 'roles', sub='bob', permissions=None), None)['statusCode'],
+            200)
+
+    def test_no_assignment_holds_nothing(self):
+        # An operator with no assignment and no claim holds nothing -> every
+        # management op 403s (fail-closed).
+        r = index.handler(_event('GET', 'reflect', sub='nobody', permissions=None), None)
+        self.assertEqual(json.loads(r['body'])['permissions'], [])
+        self.assertEqual(
+            index.handler(_event('GET', 'roles', sub='nobody', permissions=None), None)['statusCode'],
+            403)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -200,6 +200,56 @@ def caller_permissions(claims):
     return perms
 
 
+def resolve_held_permissions(actor):
+    """Resolve the caller's held permission ids from their role ASSIGNMENTS.
+
+    The web-identity token is deliberately minimal — it carries identity (`sub`)
+    and a brand tag, never permissions (the mint cannot and must not embed the
+    authority model). So authZ is resolved server-side HERE, from the authority
+    tables, under the caller's own assumed management role:
+
+      1. query ASSIGNMENT_TABLE for pk=PRINCIPAL#<sub>  -> the caller's roleIds
+      2. map each roleId -> its permissionIds (predefined roles from config,
+         custom roles from ROLE_TABLE; archived/retired roles still grant while
+         assigned)
+      3. union = the caller's held permission ids
+
+    Returns a set. An operator with no assignment holds nothing (fail-closed).
+    Must run AFTER assume_management_role so the table reads use the caller's
+    scoped credentials (the Lambda itself holds no standing table grants).
+    """
+    if not actor:
+        return set()
+    # roleId -> permissionIds, from predefined config first.
+    role_perms = {}
+    for r in _predefined_roles():
+        rid = r.get('id')
+        if rid:
+            role_perms[rid] = set(r.get('permissionIds', []))
+
+    assignments = _ddb().Table(_cfg('ASSIGNMENT_TABLE')).query(
+        KeyConditionExpression='pk = :pk',
+        ExpressionAttributeValues={':pk': f'PRINCIPAL#{actor}'},
+    ).get('Items', [])
+
+    held = set()
+    role_table = _ddb().Table(_cfg('ROLE_TABLE'))
+    for a in assignments:
+        rid = a.get('roleId')
+        if not rid:
+            continue
+        if rid in role_perms:
+            held.update(role_perms[rid])
+            continue
+        # Custom role — read its permissionIds from the role table (cache it).
+        item = role_table.get_item(
+            Key={'pk': f'ROLE#{rid}', 'sk': f'ROLE#{rid}'}).get('Item')
+        perms = set(item.get('permissionIds', [])) if item else set()
+        role_perms[rid] = perms
+        held.update(perms)
+    return held
+
+
 def audit(action, actor, target, outcome, detail=None):
     """Write an actor-stamped audit entry; log it too (R12.1, R12.2).
 
@@ -440,6 +490,8 @@ def handler(event, context):
     claims, web_identity_token = verified
 
     actor = claims.get('sub', '')
+    # Permissions from the token claims, if the consumer's mint embeds any
+    # (the horton web-identity mint does not — see resolve_held_permissions).
     held = caller_permissions(claims)
 
     # Exchange the caller's token for the estate management role and bind every
@@ -450,6 +502,16 @@ def handler(event, context):
     except Exception as exc:
         logger.error(f'assume_management_role failed: {type(exc).__name__}')
         return _response(403, {'error': 'role_assumption_failed'})
+
+    # Resolve the caller's held permissions from their role ASSIGNMENTS, under
+    # the just-assumed management role (the token carries no permissions). Union
+    # with any claim-carried permissions so a consumer whose mint DOES embed
+    # them is not regressed.
+    try:
+        held = held | resolve_held_permissions(actor)
+    except Exception as exc:
+        logger.error(f'resolve_held_permissions failed: {type(exc).__name__}')
+        return _response(403, {'error': 'permission_resolution_failed'})
 
     try:
         body = json.loads(event.get('body') or '{}')
