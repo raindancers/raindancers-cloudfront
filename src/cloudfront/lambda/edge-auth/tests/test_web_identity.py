@@ -106,6 +106,91 @@ class WebIdentityTests(unittest.TestCase):
         self.assertEqual(payload['preferred_username'], 'u@x.com')
         self.assertEqual(payload['sub'], 'user-sub')
 
+    def test_mint_carries_ui_permissions_and_scope(self):
+        # The flat-permission model: the RS256 token carries ui_permissions (a
+        # flat array, UI reflection only) and scope, forwarded from the
+        # resolver's additional_claims.
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        token = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='user-sub',
+            principal_tags_claim=None, principal_tags_value=None,
+            ttl_exp=9999999999,
+            additional_claims={
+                'ui_permissions': ['subject.read', 'list.manage'],
+                'scope': 'brand:acme',
+            },
+        )
+        payload = _b64url_json(token.split('.')[1])
+        self.assertEqual(payload['ui_permissions'], ['subject.read', 'list.manage'])
+        self.assertEqual(payload['scope'], 'brand:acme')
+
+    def test_mint_carries_multi_key_principal_tags(self):
+        # One session tag per granted permission (presence-only "1") plus the
+        # brand tag, carried as a single multi-key :k=v: principal-tags string.
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        claim = 'https://aws.amazon.com/tags/principal_tags/Claims'
+        token = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='user-sub',
+            principal_tags_claim=claim,
+            principal_tags_value=':brand=acme:subject.read=1:list.manage=1:',
+            ttl_exp=9999999999,
+        )
+        payload = _b64url_json(token.split('.')[1])
+        self.assertEqual(
+            payload[claim], ':brand=acme:subject.read=1:list.manage=1:')
+
+    def test_mint_never_overwrites_reserved_or_tag_claims(self):
+        # A resolver claim must never shadow a reserved claim or the tag claim.
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        claim = 'https://aws.amazon.com/tags/principal_tags/Claims'
+        token = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='real-sub',
+            principal_tags_claim=claim,
+            principal_tags_value=':brand=acme:',
+            ttl_exp=9999999999,
+            additional_claims={
+                'sub': 'forged-sub',
+                'exp': 1,
+                claim: ':brand=evil:',
+                'ui_permissions': ['subject.read'],
+            },
+        )
+        payload = _b64url_json(token.split('.')[1])
+        self.assertEqual(payload['sub'], 'real-sub')        # reserved, untouched
+        self.assertEqual(payload['exp'], 9999999999)        # reserved, untouched
+        self.assertEqual(payload[claim], ':brand=acme:')     # tag claim, untouched
+        self.assertEqual(payload['ui_permissions'], ['subject.read'])  # non-reserved, carried
+
+    def test_mint_refuses_when_over_budget(self):
+        # Overflow at the ceiling REFUSES (ScopeTokenExceeds), never truncates —
+        # so a partial tag set is never signed.
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        claim = 'https://aws.amazon.com/tags/principal_tags/Claims'
+        big_tags = ':' + ':'.join(f'perm{i}=1' for i in range(400)) + ':'
+        with self.assertRaises(wi.ScopeTokenExceeds):
+            wi.mint_web_identity_token(
+                config, 'ap-southeast-2', subject='user-sub',
+                principal_tags_claim=claim,
+                principal_tags_value=big_tags,
+                ttl_exp=9999999999,
+                max_bytes=1024,
+            )
+
+    def test_mint_allows_when_within_budget(self):
+        # A normal one-brand token (brand tag + a few permission tags) fits well
+        # under the ceiling and mints cleanly.
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        claim = 'https://aws.amazon.com/tags/principal_tags/Claims'
+        token = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='user-sub',
+            principal_tags_claim=claim,
+            principal_tags_value=':brand=acme:subject.read=1:list.manage=1:',
+            ttl_exp=9999999999,
+            additional_claims={'ui_permissions': ['subject.read', 'list.manage'], 'scope': 'brand:acme'},
+            max_bytes=7168,
+        )
+        self.assertEqual(len(token.split('.')), 3)
+
     def test_mint_omits_preferred_username_when_absent(self):
         config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
         # default (None) and empty string both omit the claim.

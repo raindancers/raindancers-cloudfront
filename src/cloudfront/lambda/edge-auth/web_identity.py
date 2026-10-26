@@ -42,6 +42,34 @@ def _b64url(data):
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
 
+class ScopeTokenExceeds(Exception):
+    """Raised when the assembled RS256 token would exceed the size ceiling.
+
+    The flat-permission model carries one principal tag per granted permission
+    plus the brand/scope tag inside the token (AssumeRoleWithWebIdentity has no
+    Tags request param, so the tags ride in the claim). An assignment grid that
+    cannot fit the ceiling signals a mismodelled assignment — the mint REFUSES
+    (never truncates), so a partial tag set is never signed. The caller fails
+    closed exactly as it already does for the HMAC half.
+    """
+
+
+def _rs256_assembled_len(header_b64, payload_b64):
+    """Byte length of the assembled compact RS256 JWS: header + '.' + payload +
+    '.' + the base64url signature segment. An RS256 signature over a 2048-bit
+    key is 256 bytes, which base64url-encodes (no padding) to 342 bytes. Mirrors
+    the HMAC guard's assembled-length arithmetic so both mints refuse on the
+    SAME assembled-token ceiling rather than on payload size alone.
+    """
+    return len(header_b64) + 1 + len(payload_b64) + 1 + 342
+
+
+def scope_token_exceeds(header_b64, payload_b64, max_bytes):
+    """True when the assembled RS256 token is over `max_bytes` (refuse, never
+    truncate). Same contract as the HMAC-side guard in oauth-callback.py."""
+    return _rs256_assembled_len(header_b64, payload_b64) > max_bytes
+
+
 def is_enabled(config):
     """True when the construct provisioned the asymmetric key (feature on)."""
     return bool(config.get('web_identity_signing_key_id'))
@@ -120,17 +148,29 @@ def _public_jwk(key_id, key_region):
     return jwk
 
 
-def mint_web_identity_token(config, key_region, subject, principal_tags_claim, principal_tags_value, ttl_exp, username=None):
+def mint_web_identity_token(config, key_region, subject, principal_tags_claim, principal_tags_value, ttl_exp, username=None, additional_claims=None, max_bytes=None):
     """Mint a horton-signed RS256 web-identity JWT via KMS kms:Sign.
 
     - subject: the operator `sub` (same identity as the session cookie).
     - principal_tags_claim/value: the AWS principal-tags claim key + its already
       encoded `:k=v:` value (the SAME value stamped on the HMAC cookie), so the
-      brand tag the two tokens carry can never disagree. Omitted when empty.
+      brand tag the two tokens carry can never disagree. For the flat-permission
+      model this value carries the brand/scope tag PLUS one `perm=1` tag per
+      granted permission — a multi-key `:brand=acme:subject.read=1:...:` string
+      produced by the resolver's principal-tags map. Omitted when empty.
     - ttl_exp: absolute `exp` (unix), matched to the session cookie's expiry.
     - username: optional operator UPN (preferred_username) for SCIM resolution;
       added as the `preferred_username` claim when a non-empty string. `sub` is
       left unchanged (an opaque Entra pairwise id) so audit/trust are unaffected.
+    - additional_claims: optional {name: value} map of resolver-resolved claims
+      to carry in the RS256 token — the flat `ui_permissions` array (UI
+      reflection only) and `scope` ("brand:acme" | "estate"). The caller
+      whitelist-gates this map before passing it, exactly like the HMAC side;
+      the mint only writes what it is handed. Reserved claims (iss/aud/sub/iat/
+      nbf/exp/jti and the principal-tags claim) are never overwritten.
+    - max_bytes: optional assembled-token ceiling. When set, the mint REFUSES
+      (raises ScopeTokenExceeds, never truncates) if the assembled token would
+      exceed it — so an over-budget tag grid is never signed.
 
     Returns the compact JWS string. The caller delivers it to the client.
     """
@@ -147,15 +187,25 @@ def mint_web_identity_token(config, key_region, subject, principal_tags_claim, p
         'exp': ttl_exp,
         'jti': str(uuid.uuid4()),
     }
+    _RESERVED = {'iss', 'aud', 'sub', 'iat', 'nbf', 'exp', 'jti'}
+    if additional_claims:
+        for name, value in additional_claims.items():
+            if name in _RESERVED or name == principal_tags_claim:
+                continue  # never let a resolver claim shadow a reserved/tag claim
+            payload[name] = value
     if principal_tags_claim and principal_tags_value:
         payload[principal_tags_claim] = principal_tags_value
     if isinstance(username, str) and username:
         payload['preferred_username'] = username
-    signing_input = (
-        _b64url(json.dumps(header, separators=(',', ':')).encode())
-        + '.'
-        + _b64url(json.dumps(payload, separators=(',', ':')).encode())
-    )
+    header_b64 = _b64url(json.dumps(header, separators=(',', ':')).encode())
+    payload_b64 = _b64url(json.dumps(payload, separators=(',', ':')).encode())
+    if max_bytes is not None and scope_token_exceeds(header_b64, payload_b64, max_bytes):
+        raise ScopeTokenExceeds(
+            f'assembled web-identity token is '
+            f'{_rs256_assembled_len(header_b64, payload_b64)} bytes, over '
+            f'{max_bytes}; refusing mint'
+        )
+    signing_input = header_b64 + '.' + payload_b64
     # KMS signs RSASSA-PKCS1-v1_5 over SHA-256 (RS256). Message is the signing input.
     sig = _kms(key_region).sign(
         KeyId=key_id,
