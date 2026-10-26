@@ -174,7 +174,14 @@ export interface PermissionsAdminProps {
   /** Injected store — the construct reads/writes only through these refs (R8.3). */
   readonly roleTable: dynamodb.ITable;
   readonly assignmentTable: dynamodb.ITable;
-  readonly bitRegistryTable: dynamodb.ITable;
+  /**
+   * @deprecated #195 retired the custom-role bit registry: roles are now plain
+   * permission-id sets and the handler no longer allocates/retires bits. This
+   * prop is accepted for backward compatibility but is UNUSED — the construct
+   * no longer grants access to it or passes it to the handler. Consumers should
+   * stop passing it and remove the table. It will be deleted in a future major.
+   */
+  readonly bitRegistryTable?: dynamodb.ITable;
   /**
    * Name of the assignment table's GSI that answers "is this role in use?" —
    * partition key `roleId`. Used by archive-not-delete (R11.4). @default 'roleId-index'
@@ -185,17 +192,13 @@ export interface PermissionsAdminProps {
   readonly callerIdentity: CallerIdentityConfig;
 
   /**
-   * OPTIONAL external authority-resolver hook. When supplied, the management
-   * handler invokes this Lambda synchronously with `{"sub": "<caller-sub>"}`
-   * and expects `{"permissions": string[]}` (a bare `string[]` is also
-   * accepted) — the caller's HELD permissions. The construct stays authority-
-   * agnostic: the consumer (e.g. horton) owns how a subject's held permissions
-   * are resolved (ADR-0003.2), which is required because the web_identity token
-   * carries NO permissions by design.
-   *
-   * When UNSET the handler falls back to reading the held permissions from the
-   * token claims as before (no regression). On a resolver invocation failure
-   * the handler fails CLOSED (403), never silently empty.
+   * @deprecated #195 (#66) retired the per-request authority-resolver invoke:
+   * the handler no longer decides authority (the estate role's IAM policy is the
+   * gate) and reads the caller's permissions for reflection from the token's
+   * `ui_permissions` claim. This prop is accepted for backward compatibility but
+   * is UNUSED — the construct no longer sets the resolver env var or grants
+   * invoke. Consumers should stop passing it. It will be deleted in a future
+   * major.
    */
   readonly callerPermissionsResolver?: lambda.IFunction;
 
@@ -314,7 +317,7 @@ export class PermissionsAdmin extends constructs.Construct {
       description: `permissions-admin estate management role for ${props.domainName} -- assumed per request via the caller's web_identity token`,
       maxSessionDuration: core.Duration.hours(1),
     });
-    // Permission policy: exactly the three authority tables + the role-in-use GSI.
+    // Permission policy: the two authority tables + the role-in-use GSI.
     managementRole.addToPolicy(new core.aws_iam.PolicyStatement({
       effect: core.aws_iam.Effect.ALLOW,
       actions: [
@@ -323,7 +326,6 @@ export class PermissionsAdmin extends constructs.Construct {
       ],
       resources: [
         props.roleTable.tableArn,
-        props.bitRegistryTable.tableArn,
         props.assignmentTable.tableArn,
         `${props.assignmentTable.tableArn}/index/*`,
       ],
@@ -348,7 +350,6 @@ export class PermissionsAdmin extends constructs.Construct {
       environment: {
         ROLE_TABLE: props.roleTable.tableName,
         ASSIGNMENT_TABLE: props.assignmentTable.tableName,
-        BIT_REGISTRY_TABLE: props.bitRegistryTable.tableName,
         ASSIGNMENT_ROLE_INDEX: assignmentRoleIndexName,
         // AuthN: verify the caller's RS256 web_identity token against the JWKS.
         JWKS_URI: props.callerIdentity.jwksUri,
@@ -364,19 +365,9 @@ export class PermissionsAdmin extends constructs.Construct {
         ESTATE_LEVEL_PERMS: JSON.stringify(props.scopeDimension.estateLevelPermissionIds),
         SCOPE_LABEL: props.scopeDimension.label,
         MANAGEMENT_PERMISSIONS: JSON.stringify(props.managementPermissions),
-        // Optional external authority resolver: when set, the handler invokes
-        // this Lambda to resolve the caller's held permissions instead of
-        // reading them from the token claim. Empty string = fall back to claim.
-        CALLER_PERMISSIONS_RESOLVER_ARN: props.callerPermissionsResolver?.functionArn ?? '',
       },
     });
     this.managementFunction = fn;
-
-    // Grant the handler permission to invoke the external authority resolver,
-    // when one is supplied. (Regional -> regional lambda:Invoke; fine.)
-    if (props.callerPermissionsResolver) {
-      props.callerPermissionsResolver.grantInvoke(fn);
-    }
 
     // The Lambda's OWN role gets NO table grants and NO secret read. Its only
     // added power is to assume the management role via web identity — which is a
