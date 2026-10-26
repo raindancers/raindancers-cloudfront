@@ -730,6 +730,20 @@ def lambda_handler(event, context):
         web_identity_cookie = None
         if web_identity.is_enabled(config):
             try:
+                # Flat-permission model: carry the resolver's UI/scope claims in
+                # the RS256 token too (today they reach only the HMAC cookie).
+                # Whitelist-gate them exactly like the HMAC side — when a
+                # whitelist is configured a claim must be in it; with no
+                # whitelist the fallback allows it (matches the claim-filter
+                # fallback above). Reserved/tag claims are dropped by the mint.
+                wi_additional_claims = {}
+                if additional_claims:
+                    if jwt_claims_whitelist_str:
+                        wi_additional_claims = {
+                            k: v for k, v in additional_claims.items() if k in whitelist
+                        }
+                    else:
+                        wi_additional_claims = dict(additional_claims)
                 wi_token = web_identity.mint_web_identity_token(
                     config,
                     WEB_IDENTITY_KEY_REGION,
@@ -738,6 +752,8 @@ def lambda_handler(event, context):
                     principal_tags_value=session_payload.get(PRINCIPAL_TAGS_CLAIM),
                     ttl_exp=azure_exp_timestamp,
                     username=payload.get('preferred_username'),
+                    additional_claims=wi_additional_claims,
+                    max_bytes=scope_token_max_bytes,
                 )
                 web_identity_cookie = (
                     f'{cookie_prefix}web_identity={wi_token}; '
