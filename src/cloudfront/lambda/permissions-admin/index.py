@@ -1,25 +1,35 @@
 """Regional management Lambda for the PermissionsAdmin construct.
 
-The SOLE enforcement point for the (role, scope, assignment) authority model.
-Every request runs one gate order:
+Under the #195 token model the ESTATE MANAGEMENT ROLE's own IAM policy is the
+authority gate, NOT this handler. Authority is resolved once at login and baked
+into the caller's `web_identity` token; a caller who lacks the estate authority
+cannot assume the management role (or the role's policy refuses the DynamoDB
+call), so the handler makes NO per-request authZ decision from the token claims.
+
+Every request runs:
 
   1. authN  — RS256-verify the caller's `web_identity` token against the
-              published JWKS (R10.1). HMAC is the CloudFront edge's concern and
-              is never used here (two-token model).
-  2. authZ  — the op's required management permission is in the caller's own
-              role claims, else 403 fail-closed (R10.2).
-  3. invariants (server-side, R11):
+              published JWKS. HMAC is the CloudFront edge's concern and is never
+              used here (two-token model).
+  2. assume — exchange the token for the estate management role via
+              sts:AssumeRoleWithWebIdentity. This IS the gate: a caller without
+              the estate authority fails here (403 role_assumption_failed), and
+              the role's scoped credentials fence every table call.
+  3. invariants (server-side, enforced by the handler because AWS cannot):
        - no-escalation: a permission placed into a role must be held by the
-         caller (R11.1);
+         caller;
        - rights-act lockout: any locked-out permission in a role body is denied
-         for every caller (R11.2);
+         for every caller;
        - immutable predefined: edit/rename/delete/shadow of a predefined role is
-         denied (R11.3);
-       - archive-not-delete: deleting an in-use role archives it + retires its
-         bit (R11.4, R13.3).
-  4. mutation — written only through the injected tables (R8.3).
+         denied;
+       - archive-not-delete: deleting an in-use role archives it.
+  4. mutation — written only through the assumed-role credentials.
   5. audit    — every mutation and every denial is stamped with the acting
-                principal (R12).
+                principal.
+
+Roles are plain sets of permission ids — no bit allocation, no 16-bit cap. The
+caller's `ui_permissions` token claim drives ONLY the SPA reflection endpoint
+(so the UI can hide actions); the handler makes no authZ decision from it.
 
 Config comes from env vars (this is a regional Lambda, not Lambda@Edge). boto3
 is imported lazily so unit tests can patch the DynamoDB layer without AWS.
@@ -68,56 +78,6 @@ def _sts():
         import boto3
         _STS = boto3.client('sts')
     return _STS
-
-
-def resolve_held_via_resolver(sub, username=None):
-    """Resolve the caller's HELD permissions via the optional external authority
-    resolver (ADR-0003.2). The construct is authority-agnostic: the consumer's
-    resolver Lambda owns how a subject's held permissions are computed, which is
-    required because the web_identity token carries no permissions by design.
-
-    Returns a `set` of permission ids, or `None` when no resolver is configured
-    (CALLER_PERMISSIONS_RESOLVER_ARN empty) so the handler falls back to the
-    token claim. Fails CLOSED: ANY invoke error, FunctionError, or malformed
-    payload raises RuntimeError rather than returning a silent empty set.
-    """
-    arn = os.environ.get('CALLER_PERMISSIONS_RESOLVER_ARN', '').strip()
-    if not arn:
-        return None
-
-    # arn:aws:lambda:<region>:<account>:function:<name>
-    parts = arn.split(':')
-    if len(parts) < 4 or not parts[3]:
-        raise RuntimeError(f'malformed resolver ARN: {arn!r}')
-    region = parts[3]
-
-    import boto3
-    client = boto3.client('lambda', region_name=region)
-    resp = client.invoke(
-        FunctionName=arn,
-        InvocationType='RequestResponse',
-        Payload=json.dumps({'sub': sub, 'username': username}).encode('utf-8'),
-    )
-    if resp.get('FunctionError'):
-        raise RuntimeError(f'resolver FunctionError: {resp.get("FunctionError")}')
-
-    payload_stream = resp.get('Payload')
-    raw = payload_stream.read() if payload_stream is not None else b''
-    try:
-        data = json.loads(raw or b'null')
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError(f'resolver returned non-JSON payload: {exc}')
-
-    if isinstance(data, dict):
-        perms = data.get('permissions')
-    elif isinstance(data, list):
-        perms = data
-    else:
-        raise RuntimeError(f'resolver payload not an object or list: {type(data).__name__}')
-
-    if not isinstance(perms, list) or not all(isinstance(p, str) for p in perms):
-        raise RuntimeError('resolver permissions is not a list of strings')
-    return set(perms)
 
 
 def assume_management_role(web_identity_token, actor):
@@ -233,21 +193,20 @@ def verify_web_identity(cookie_header):
         return None
 
 
-def caller_permissions(claims):
-    """Flatten the caller's held permission ids from their session role claims.
+def ui_permissions(claims):
+    """The caller's `ui_permissions` token claim — a flat list of permission ids
+    baked into the web_identity token at mint for the SPA to render only
+    permitted actions.
 
-    The mint carries `roles` as the resolver's bitmask-per-scope structure; for
-    management-permission checks we also accept a flat `permissions` list the
-    consumer's resolver may include. Returns a set of permission ids.
+    This is a UI convenience ONLY. The handler makes NO authZ decision from it:
+    the authority gate is the estate management role's IAM policy, reached via
+    the token's baked-in estate authority at assume time (#195). Returns a set
+    of permission ids (empty when the claim is absent or malformed).
     """
-    perms = set()
-    raw = claims.get('permissions')
+    raw = claims.get('ui_permissions')
     if isinstance(raw, list):
-        perms.update(raw)
-    roles = claims.get('roles')
-    if isinstance(roles, list):
-        perms.update(roles)
-    return perms
+        return {p for p in raw if isinstance(p, str)}
+    return set()
 
 
 def audit(action, actor, target, outcome, detail=None):
@@ -275,50 +234,7 @@ def audit(action, actor, target, outcome, detail=None):
         logger.error(f'Audit persist failed (non-fatal): {e}')
 
 
-# --- bit registry (R13) ------------------------------------------------------
-def allocate_custom_bit(scope_id, role_id):
-    """Allocate the lowest free bit 0-15 in a scope's custom mask.
-
-    A retired bit is never handed out again (R13.3). Raises when all 16 bits are
-    taken (active or retired) — the role cap is 16 (from the issue).
-    """
-    table = _ddb().Table(_cfg('BIT_REGISTRY_TABLE'))
-    taken = set()
-    resp = table.query(
-        KeyConditionExpression='pk = :pk',
-        ExpressionAttributeValues={':pk': f'SCOPE#{scope_id}'},
-    )
-    for item in resp.get('Items', []):
-        taken.add(int(item['bit']))
-    for bit in range(16):
-        if bit not in taken:
-            table.put_item(Item={
-                'pk': f'SCOPE#{scope_id}', 'sk': f'BIT#{bit}',
-                'bit': bit, 'roleId': role_id, 'status': 'active',
-            })
-            return bit
-    raise ValueError('custom mask full: all 16 bits allocated or retired')
-
-
-def retire_custom_bit(scope_id, role_id):
-    """Retire (never remove) a custom role's bit so it is never reused (R13.3)."""
-    table = _ddb().Table(_cfg('BIT_REGISTRY_TABLE'))
-    resp = table.query(
-        KeyConditionExpression='pk = :pk',
-        ExpressionAttributeValues={':pk': f'SCOPE#{scope_id}'},
-    )
-    for item in resp.get('Items', []):
-        if item.get('roleId') == role_id and item.get('status') == 'active':
-            table.update_item(
-                Key={'pk': item['pk'], 'sk': item['sk']},
-                UpdateExpression='SET #s = :r',
-                ExpressionAttributeNames={'#s': 'status'},
-                ExpressionAttributeValues={':r': 'retired'},
-            )
-            return int(item['bit'])
-    return None
-
-
+# --- role-in-use check -------------------------------------------------------
 def role_in_use(role_id):
     """True if any assignment references this role (archive-not-delete, R11.4)."""
     table = _ddb().Table(_cfg('ASSIGNMENT_TABLE'))
@@ -341,7 +257,9 @@ def _predefined_ids_and_names():
 
 
 def create_role(actor, held, body):
-    """Create a custom role, enforcing all invariants (R11.1-R11.3, R13.2)."""
+    """Create a custom role as a plain set of permission ids, enforcing the
+    server-side invariants (immutable-predefined, rights-act lockout,
+    no-escalation). No bit allocation under #195."""
     role_id = body.get('id', '')
     name = body.get('name', '')
     scope_id = body.get('scopeId', 'ESTATE')
@@ -365,18 +283,18 @@ def create_role(actor, held, body):
         audit('createRole', actor, role_id, 'denied', f'escalation: {sorted(escalated)}')
         return _response(403, {'error': 'no_escalation'})
 
-    bit = allocate_custom_bit(scope_id, role_id)
     _ddb().Table(_cfg('ROLE_TABLE')).put_item(Item={
         'pk': f'ROLE#{role_id}', 'sk': f'ROLE#{role_id}',
-        'name': name, 'scopeId': scope_id, 'mask': 'custom', 'bit': bit,
+        'name': name, 'scopeId': scope_id,
         'permissionIds': sorted(permission_ids), 'status': 'active',
     })
-    audit('createRole', actor, role_id, 'ok', f'bit={bit}')
-    return _response(201, {'id': role_id, 'bit': bit, 'status': 'active'})
+    audit('createRole', actor, role_id, 'ok')
+    return _response(201, {'id': role_id, 'status': 'active'})
 
 
 def delete_role(actor, held, body):
-    """Delete a custom role — archive-not-delete if in use (R11.3, R11.4)."""
+    """Delete a custom role — archive-not-delete if it is in use; predefined
+    roles are immutable. No bit retirement under #195."""
     role_id = body.get('id', '')
     pre_ids, _ = _predefined_ids_and_names()
     if role_id in pre_ids:
@@ -387,7 +305,6 @@ def delete_role(actor, held, body):
     existing = table.get_item(Key={'pk': f'ROLE#{role_id}', 'sk': f'ROLE#{role_id}'}).get('Item')
     if not existing:
         return _response(404, {'error': 'role_not_found'})
-    scope_id = existing.get('scopeId', 'ESTATE')
 
     if role_in_use(role_id):
         table.update_item(
@@ -396,11 +313,9 @@ def delete_role(actor, held, body):
             ExpressionAttributeNames={'#s': 'status'},
             ExpressionAttributeValues={':a': 'archived'},
         )
-        retire_custom_bit(scope_id, role_id)
         audit('deleteRole', actor, role_id, 'archived', 'in use by >=1 assignment')
         return _response(200, {'id': role_id, 'status': 'archived'})
 
-    retire_custom_bit(scope_id, role_id)
     table.delete_item(Key={'pk': f'ROLE#{role_id}', 'sk': f'ROLE#{role_id}'})
     audit('deleteRole', actor, role_id, 'deleted')
     return _response(200, {'id': role_id, 'status': 'deleted'})
@@ -442,23 +357,26 @@ def list_assignments(actor, held, body):
 def reflect_permissions(actor, held, body):
     """The caller's-own-permissions reflection endpoint the SPA calls on load.
 
-    Returns which management operations the caller may perform, so the SPA can
-    render only permitted actions (fail-closed to hidden, R9.2). The SPA
-    enforces nothing — this is a convenience mirror of the server-side authZ.
+    Returns the caller's `ui_permissions` (baked into the token at mint) so the
+    SPA can render only the actions the caller holds (fail-closed to hidden).
+    This is a UI convenience mirror ONLY — the handler makes NO authZ decision
+    from it; the authority gate is the estate role's IAM policy (#195). `held`
+    here is exactly the token's ui_permissions set.
     """
     mgmt = _management_permissions()
     allowed = {op: (perm in held) for op, perm in mgmt.items()}
     return _response(200, {'permissions': sorted(held), 'operations': allowed})
 
 
-# op key -> (management-permission map key, handler). reflect has no gate.
+# op key -> handler. No per-request authZ gate under #195: the estate role's
+# IAM policy is the authority gate. reflect is handled before this map.
 _OPS = {
-    ('POST', 'roles'): ('createRole', create_role),
-    ('DELETE', 'roles'): ('deleteRole', delete_role),
-    ('GET', 'roles'): ('listRoles', list_roles),
-    ('POST', 'assignments'): ('createAssignment', create_assignment),
-    ('DELETE', 'assignments'): ('deleteAssignment', delete_assignment),
-    ('GET', 'assignments'): ('listAssignments', list_assignments),
+    ('POST', 'roles'): create_role,
+    ('DELETE', 'roles'): delete_role,
+    ('GET', 'roles'): list_roles,
+    ('POST', 'assignments'): create_assignment,
+    ('DELETE', 'assignments'): delete_assignment,
+    ('GET', 'assignments'): list_assignments,
 }
 
 
@@ -490,19 +408,18 @@ def handler(event, context):
     claims, web_identity_token = verified
 
     actor = claims.get('sub', '')
-    # Resolve the caller's HELD permissions. When an external authority resolver
-    # is configured the construct delegates to it (the consumer owns authZ,
-    # ADR-0003.2); otherwise fall back to the token claim (no regression). A
-    # resolver failure is fail-closed (403), never a silent empty set.
-    try:
-        resolved = resolve_held_via_resolver(actor, claims.get('preferred_username'))
-    except Exception as exc:
-        logger.error(f'resolve_held_via_resolver failed: {type(exc).__name__}: {exc}')
-        return _response(403, {'error': 'permission_resolution_failed'})
-    held = resolved if resolved is not None else caller_permissions(claims)
+    # The caller's authority is baked into the token at login (#195); the estate
+    # management role's IAM policy is the authority gate. The handler makes no
+    # per-request authZ decision from claims. `held` is the token's
+    # `ui_permissions` claim — used by the SPA reflection endpoint, and by the
+    # server-side no-escalation invariant (a caller may not place a permission
+    # into a role they do not themselves hold).
+    held = ui_permissions(claims)
 
     # Exchange the caller's token for the estate management role and bind every
-    # table call in this request to those scoped credentials. The Lambda itself
+    # table call in this request to those scoped credentials. This IS the
+    # authority gate: a caller lacking the estate authority cannot assume the
+    # role, and the role's policy refuses the DynamoDB call. The Lambda itself
     # holds no table grants (two-token model); a failure here is fail-closed.
     try:
         _REQUEST_DDB.set(assume_management_role(web_identity_token, actor))
@@ -522,11 +439,4 @@ def handler(event, context):
     if not op:
         return _response(404, {'error': 'unknown_operation'})
 
-    perm_key, fn = op
-    required = _management_permissions().get(perm_key)
-    # authZ — fail-closed: missing required management permission => 403.
-    if not required or required not in held:
-        audit(perm_key, actor, resource, 'denied', 'missing management permission')
-        return _response(403, {'error': 'missing_management_permission'})
-
-    return fn(actor, held, body)
+    return op(actor, held, body)
