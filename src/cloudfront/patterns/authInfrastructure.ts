@@ -70,6 +70,10 @@ export interface AuthInfrastructureProps {
   readonly postAuthHookTimeout?: number;
   /** Fail closed if hook is unavailable. @default true */
   readonly postAuthHookFailClosed?: boolean;
+  /** SigV4-sign the post-auth hook (service `lambda`) so it can be an IAM-gated Function URL. @default false */
+  readonly postAuthHookSigv4?: boolean;
+  /** Region to SigV4-sign the post-auth hook for. @default web-identity key region / ambient */
+  readonly postAuthHookRegion?: string;
   /** Enable refresh token storage. @default false */
   readonly enableRefresh?: boolean;
   /**
@@ -156,6 +160,8 @@ export class AuthInfrastructure extends constructs.Construct {
       postAuthHookUrl: props.postAuthHookUrl,
       postAuthHookTimeout: props.postAuthHookTimeout,
       postAuthHookFailClosed: props.postAuthHookFailClosed,
+      postAuthHookSigv4: props.postAuthHookSigv4,
+      postAuthHookRegion: props.postAuthHookRegion,
       enableRefresh: props.enableRefresh,
       scopeTokenMaxBytes: props.scopeTokenMaxBytes,
       enableWebIdentityToken: props.enableWebIdentityToken,

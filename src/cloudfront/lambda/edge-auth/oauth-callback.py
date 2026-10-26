@@ -67,6 +67,35 @@ def scope_token_exceeds(header_b64, payload_b64, max_bytes):
     return assembled_token_len(header_b64, payload_b64) > max_bytes
 
 
+def _sigv4_sign_hook(url, body_bytes, region):
+    """Return SigV4 Authorization headers for a POST of ``body_bytes`` to ``url``,
+    signed for the Lambda Function URL service ('lambda') with the edge Lambda's
+    ambient credentials. Used when the hook endpoint is an IAM-gated Function URL
+    (post_auth_hook_sigv4), so an authority-minting resolver is never a public,
+    unauthenticated endpoint. Returns a dict of headers to add to the request.
+
+    Signing is done with botocore primitives (available in the Lambda runtime);
+    the Function URL's own IAM auth validates the signature against the edge
+    role, which the resolver's resource policy grants lambda:InvokeFunctionUrl.
+    """
+    from botocore.auth import SigV4Auth
+    from botocore.awsrequest import AWSRequest
+
+    session = boto3.Session()
+    creds = session.get_credentials()
+    if creds is None:
+        raise RuntimeError('no ambient credentials to SigV4-sign the post-auth hook')
+    sign_region = region or session.region_name or 'us-east-1'
+    aws_req = AWSRequest(
+        method='POST',
+        url=url,
+        data=body_bytes,
+        headers={'Content-Type': 'application/json'},
+    )
+    SigV4Auth(creds.get_frozen_credentials(), 'lambda', sign_region).add_auth(aws_req)
+    return dict(aws_req.headers)
+
+
 def get_config_cached():
     """Get cached config"""
     global CONFIG, dynamodb, sns_client
@@ -510,16 +539,28 @@ def lambda_handler(event, context):
             logger.info(f'Step 2.5: Calling post-auth identity hook: {post_auth_hook_url}')
             hook_timeout = int(config.get('post_auth_hook_timeout', '3'))
             hook_fail_closed = config.get('post_auth_hook_fail_closed', 'true').lower() == 'true'
+            hook_sigv4 = str(config.get('post_auth_hook_sigv4', 'false')).lower() == 'true'
             try:
                 hook_body = json.dumps({
                     'sub': payload.get('sub'),
                     'email': payload.get('email'),
                     'claims': {k: v for k, v in payload.items() if k not in ['aio', 'rh', 'uti', 'nonce']}
                 }).encode('utf-8')
+                # When the hook is an IAM-gated Lambda Function URL (an
+                # authority-minting resolver must NOT be a public endpoint),
+                # SigV4-sign the request with the edge role's credentials so the
+                # URL's AWS_IAM auth admits it. Default off: an ordinary identity
+                # hook (e.g. customer_id resolution) stays an unsigned POST.
+                hook_headers = {'Content-Type': 'application/json'}
+                if hook_sigv4:
+                    hook_headers = _sigv4_sign_hook(
+                        post_auth_hook_url, hook_body,
+                        config.get('post_auth_hook_region', WEB_IDENTITY_KEY_REGION),
+                    )
                 hook_req = urllib.request.Request(
                     post_auth_hook_url,
                     data=hook_body,
-                    headers={'Content-Type': 'application/json'},
+                    headers=hook_headers,
                     method='POST'
                 )
                 with urllib.request.urlopen(hook_req, timeout=hook_timeout) as hook_response:
