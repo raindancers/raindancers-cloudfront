@@ -91,5 +91,69 @@ class TokenSizeGuardTests(unittest.TestCase):
             )
 
 
+class HookSigV4Tests(unittest.TestCase):
+    """The post-auth hook can SigV4-sign its request so an authority-minting
+    resolver sits behind an IAM-gated Function URL instead of a public one."""
+
+    def _fake_boto3(self):
+        import types as _t
+
+        class _Frozen:
+            access_key = 'AKIAEXAMPLE'
+            secret_key = 'secret'
+            token = 'session-token'
+
+        class _Creds:
+            def get_frozen_credentials(self):
+                return _Frozen()
+
+        class _Session:
+            region_name = 'ap-southeast-2'
+
+            def get_credentials(self):
+                return _Creds()
+
+        fake = _t.ModuleType('boto3')
+        fake.Session = lambda *a, **k: _Session()
+        fake.__version__ = 'fake'
+        return fake
+
+    def test_sign_produces_sigv4_authorization_for_lambda_service(self):
+        saved = mint.boto3
+        mint.boto3 = self._fake_boto3()
+        try:
+            headers = mint._sigv4_sign_hook(
+                'https://abc123.lambda-url.ap-southeast-2.on.aws/',
+                b'{"sub":"x"}',
+                'ap-southeast-2',
+            )
+        finally:
+            mint.boto3 = saved
+        auth = headers.get('Authorization', '')
+        self.assertIn('AWS4-HMAC-SHA256', auth)
+        # signed for the Lambda Function URL service in the given region.
+        self.assertIn('/ap-southeast-2/lambda/aws4_request', auth)
+        self.assertIn('X-Amz-Security-Token', headers)
+
+    def test_sign_raises_without_credentials(self):
+        import types as _t
+
+        class _NoCredsSession:
+            region_name = 'ap-southeast-2'
+
+            def get_credentials(self):
+                return None
+
+        fake = _t.ModuleType('boto3')
+        fake.Session = lambda *a, **k: _NoCredsSession()
+        saved = mint.boto3
+        mint.boto3 = fake
+        try:
+            with self.assertRaises(RuntimeError):
+                mint._sigv4_sign_hook('https://x.on.aws/', b'{}', 'ap-southeast-2')
+        finally:
+            mint.boto3 = saved
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -27,6 +27,15 @@ export interface AuthSecretManagerProps {
   readonly postAuthHookTimeout?: number;
   /** Whether to deny auth if the hook fails or is unavailable. @default true */
   readonly postAuthHookFailClosed?: boolean;
+  /**
+   * SigV4-sign the post-auth hook request (service `lambda`) with the edge
+   * role's credentials, so the hook may be an IAM-gated Lambda Function URL
+   * rather than a public endpoint. Use this when the hook mints authority.
+   * @default false
+   */
+  readonly postAuthHookSigv4?: boolean;
+  /** Region to SigV4-sign the post-auth hook for. @default the web-identity key region / ambient */
+  readonly postAuthHookRegion?: string;
   /** Whether to store refresh tokens for silent session renewal. @default false */
   readonly enableRefresh?: boolean;
   /**
@@ -133,6 +142,8 @@ export class AuthSecretManager extends constructs.Construct {
       post_auth_hook_url: props.postAuthHookUrl || '',
       post_auth_hook_timeout: String(props.postAuthHookTimeout ?? 3),
       post_auth_hook_fail_closed: (props.postAuthHookFailClosed ?? true) ? 'true' : 'false',
+      post_auth_hook_sigv4: (props.postAuthHookSigv4 ?? false) ? 'true' : 'false',
+      post_auth_hook_region: props.postAuthHookRegion || '',
       enable_refresh: props.enableRefresh ? 'true' : 'false',
     };
     // Only emitted when explicitly set, so the mint's built-in 7168 default
