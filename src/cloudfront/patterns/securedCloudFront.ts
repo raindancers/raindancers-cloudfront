@@ -457,6 +457,22 @@ def get_config():
           }],
           cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
         };
+        // Scope SWITCH / re-mint (#195 §5.7). The same EdgeFunction dispatches
+        // /oauth2/switch: it reuses the operator's existing session cookie,
+        // re-runs the resolver hook for the requested scope, and re-mints the
+        // session + web_identity cookies. Must be NON-cacheable (it reads the
+        // request cookies and emits Set-Cookie) — CACHING_DISABLED, like the
+        // OAuth callback, so Set-Cookie reaches the viewer and the per-request
+        // cookies are never served from cache.
+        additionalBehaviors['/oauth2/switch'] = {
+          origin: props.defaultBehavior.origin,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          edgeLambdas: [{
+            functionVersion: oauthCallbackFunction.currentVersion,
+            eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+          }],
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        };
       }
     }
 
