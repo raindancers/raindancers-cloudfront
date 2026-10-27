@@ -135,6 +135,19 @@ export interface CloudFrontWithAzureAuthSplitProps<TRole extends string = string
   /** Whether to fail closed (deny auth) if the post-auth hook returns an error or is unavailable. @default true */
   readonly postAuthHookFailClosed?: boolean;
   /**
+   * ARN of the Lambda function that backs the post-auth hook Function URL, when
+   * that URL is an IAM-gated (`AWS_IAM`) Lambda Function URL the edge mint
+   * SigV4-signs. Setting this grants the edge mint role an IDENTITY-side
+   * `lambda:InvokeFunctionUrl` + `lambda:InvokeFunction` on that function — which
+   * is what authorizes a SAME-ACCOUNT caller of an `AWS_IAM` Function URL (a
+   * resource-based policy alone does not: AWS evaluates same-account Function-URL
+   * callers through their identity policy). Without this grant the signed edge
+   * call is refused 403 and, with `postAuthHookFailClosed`, the mint returns the
+   * 503 "Identity resolution unavailable" seen at login. Omit for a public hook
+   * URL or no hook. @default undefined (no grant)
+   */
+  readonly postAuthHookFunctionArn?: string;
+  /**
    * Enable the RS256 **web-identity token** half of the two-token model on the
    * mint. Must match the `enableWebIdentityToken` set on the `AuthInfrastructure`
    * that published this prefix (the mint signs with the key AuthInfrastructure
@@ -252,6 +265,23 @@ export class SecuredCloudFront<TRole extends string = string> extends constructs
       actions: ['sts:GetWebIdentityToken'],
       resources: ['*'],
     }));
+
+    // When the post-auth hook is an IAM-gated (AWS_IAM) Lambda Function URL that
+    // the mint SigV4-signs, the edge role must hold an IDENTITY-side grant to
+    // invoke it: for a SAME-ACCOUNT caller of an AWS_IAM Function URL, AWS
+    // authorizes through the caller's identity policy, not the function's
+    // resource policy. Both lambda:InvokeFunctionUrl and lambda:InvokeFunction
+    // are granted (Function URLs created from Oct 2025 require both). Direct
+    // addToPolicy (not a grant method) to stay consistent with the statements
+    // above and avoid a cross-stack/cross-region circular dependency on the
+    // resolver, which lives in the auth region.
+    if (props.postAuthHookFunctionArn) {
+      this.lambdaEdgeRole.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['lambda:InvokeFunctionUrl', 'lambda:InvokeFunction'],
+        resources: [props.postAuthHookFunctionArn],
+      }));
+    }
 
     // RS256 web-identity half: let the mint sign the role-assumption token with
     // the asymmetric key (kms:Sign) and build the JWKS (kms:GetPublicKey). The
