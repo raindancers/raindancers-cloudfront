@@ -248,6 +248,252 @@ def validate_jwt_token(id_token, azure_tenant_id, azure_client_id):
 
 
 
+def _parse_request_cookies(request):
+    """Parse the request's Cookie header into a {name: value} dict (edge event
+    shape). Returns an empty dict when no cookie header is present."""
+    cookies = {}
+    hdrs = request.get('headers', {})
+    if 'cookie' in hdrs:
+        for part in hdrs['cookie'][0]['value'].split('; '):
+            if '=' in part:
+                name, value = part.split('=', 1)
+                cookies[name] = value
+    return cookies
+
+
+def _requested_scope(request):
+    """The scope the operator is switching to, from the query string
+    (?scope=brand:acme | ?scope=estate). Returns None when absent/blank."""
+    qs = request.get('querystring', '') or ''
+    for pair in qs.split('&'):
+        if pair.startswith('scope='):
+            val = urllib.parse.unquote(pair[len('scope='):]).strip()
+            return val or None
+    return None
+
+
+def _verify_session_cookie(cookies, cookie_prefix):
+    """Verify the HMAC session cookie and return its decoded payload, or None.
+
+    Reuses the mint's own HMAC secret + SHA-256 scheme. A missing cookie, a
+    malformed token, or a signature mismatch all return None (the caller then
+    fails closed with 401). This is NOT a fresh Entra login — it proves the
+    caller already holds a valid session minted by the OAuth callback.
+    """
+    token = cookies.get(f'{cookie_prefix}auth_session') or cookies.get('auth_session')
+    if not token or token.count('.') != 2:
+        return None
+    header_b64, payload_b64, sig_b64 = token.split('.')
+    try:
+        expected = hmac.new(
+            get_hmac_secret().encode('utf-8'),
+            f'{header_b64}.{payload_b64}'.encode('utf-8'),
+            hashlib.sha256,
+        ).digest()
+        got = base64.urlsafe_b64decode(sig_b64 + '=' * (-len(sig_b64) % 4))
+        if not hmac.compare_digest(expected, got):
+            return None
+        padded = payload_b64 + '=' * (-len(payload_b64) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded).decode('utf-8'))
+    except Exception as e:
+        logger.warning(f'scope switch: session cookie verify failed: {e}')
+        return None
+
+
+def handle_scope_switch(request):
+    """Re-mint the operator's tokens for a REQUESTED scope (#195 §5.7 switch).
+
+    Preconditions: the operator already holds a valid session (from the OAuth
+    callback) and the two-token web_identity feature is on. This route:
+      1. verifies the existing HMAC session cookie (no Entra round-trip);
+      2. reads the requested scope from the query string;
+      3. re-runs the post-auth resolver hook with ``requested_scope`` set, so
+         the resolver mints that scope's ui_permissions + principal-tags (it
+         fails closed to empty authority when the caller does not hold it);
+      4. re-mints the HS256 session + RS256 web_identity cookies for that scope;
+      5. revokes the prior jti so the old-scope token cannot be replayed;
+      6. returns 200 JSON with the new Set-Cookie headers.
+
+    Fail-closed throughout: no session -> 401; no scope -> 400; feature off or
+    hook failure -> the same closed responses the callback uses.
+    """
+    try:
+        config = get_config_cached()
+    except Exception as e:
+        logger.error(f'scope switch: failed to load config: {e}')
+        return {'status': '500', 'statusDescription': 'Internal Server Error', 'body': 'Configuration error'}
+
+    if not web_identity.is_enabled(config):
+        return {'status': '404', 'statusDescription': 'Not Found', 'body': 'Not found'}
+
+    cookie_domain = config.get('cookie_domain', '')
+    cookie_prefix = '__Secure-' if cookie_domain else '__Host-'
+    cookies = _parse_request_cookies(request)
+
+    session = _verify_session_cookie(cookies, cookie_prefix)
+    if not session:
+        return {'status': '401', 'statusDescription': 'Unauthorized',
+                'body': json.dumps({'error': 'invalid_session'})}
+
+    requested = _requested_scope(request)
+    if not requested:
+        return {'status': '400', 'statusDescription': 'Bad Request',
+                'body': json.dumps({'error': 'missing_scope'})}
+
+    sub = session.get('sub')
+    username = session.get('preferred_username')
+    hook_url = config.get('post_auth_hook_url')
+    if not hook_url:
+        # Without the resolver there is no per-scope authority to mint.
+        logger.error('scope switch: no post_auth_hook_url configured')
+        return {'status': '404', 'statusDescription': 'Not Found', 'body': 'Not found'}
+
+    # Re-run the resolver hook for the REQUESTED scope. Identical call shape to
+    # the callback's hook, plus `requested_scope` — the resolver honours it and
+    # fails closed (empty authority) when the caller does not hold that scope.
+    additional_claims = {}
+    scope_principal_tags = {}
+    hook_timeout = int(config.get('post_auth_hook_timeout', '3'))
+    hook_sigv4 = str(config.get('post_auth_hook_sigv4', 'false')).lower() == 'true'
+    try:
+        hook_body = json.dumps({
+            'sub': sub,
+            'email': session.get('email'),
+            'username': username,
+            'requested_scope': requested,
+            'claims': {k: v for k, v in session.items()
+                       if k not in ['aio', 'rh', 'uti', 'nonce', 'jti', 'iat', 'exp']},
+        }).encode('utf-8')
+        hook_headers = {'Content-Type': 'application/json'}
+        if hook_sigv4:
+            hook_headers = _sigv4_sign_hook(
+                hook_url, hook_body,
+                config.get('post_auth_hook_region', WEB_IDENTITY_KEY_REGION),
+            )
+        hook_req = urllib.request.Request(hook_url, data=hook_body, headers=hook_headers, method='POST')
+        with urllib.request.urlopen(hook_req, timeout=hook_timeout) as resp:
+            hook_result = json.loads(resp.read().decode('utf-8'))
+            additional_claims = hook_result.get('additional_claims', {})
+            scope_principal_tags = hook_result.get('principal_tags', {})
+    except Exception as e:
+        logger.error(f'scope switch: resolver hook failed: {e}')
+        return {'status': '503', 'statusDescription': 'Service Unavailable',
+                'body': json.dumps({'error': 'scope_resolution_unavailable'})}
+
+    # A resolver that returned no scope tag for the requested scope means the
+    # caller does not hold it: refuse rather than mint an empty-authority token.
+    if not scope_principal_tags:
+        logger.warning(f'scope switch: caller {sub} does not hold scope {requested}')
+        return {'status': '403', 'statusDescription': 'Forbidden',
+                'body': json.dumps({'error': 'scope_not_held'})}
+
+    # Build the new session payload — same shape and whitelist discipline as the
+    # callback mint, carrying the resolver's new-scope claims + principal tags.
+    jwt_claims_whitelist_str = config.get('jwt_claims_whitelist', '')
+    whitelist = json.loads(jwt_claims_whitelist_str) if jwt_claims_whitelist_str else None
+    base_claims = {k: v for k, v in session.items()
+                   if k not in ['jti', 'iat', PRINCIPAL_TAGS_CLAIM]}
+    if whitelist is not None:
+        base_claims = {k: v for k, v in base_claims.items() if k in whitelist or k in ('sub', 'exp', 'iss', 'idp')}
+
+    new_jti = f'sess_{uuid.uuid4().hex}'
+    ttl_exp = int(session.get('exp', int(time.time()) + 3600))
+    session_payload = {
+        **base_claims,
+        **additional_claims,
+        'jti': new_jti,
+        'iat': int(time.time()),
+    }
+    encoded_tags = encode_principal_tags(scope_principal_tags)
+    if encoded_tags is not None:
+        tag_allowed = (PRINCIPAL_TAGS_CLAIM in whitelist) if whitelist is not None else True
+        if tag_allowed:
+            session_payload[PRINCIPAL_TAGS_CLAIM] = encoded_tags
+
+    header = {'alg': 'HS256', 'typ': 'JWT'}
+    header_b64 = base64.urlsafe_b64encode(json.dumps(header, separators=(',', ':')).encode()).decode().rstrip('=')
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(session_payload, separators=(',', ':')).encode()).decode().rstrip('=')
+
+    scope_token_max_bytes = int(config.get('scope_token_max_bytes', '7168'))
+    if scope_token_exceeds(header_b64, payload_b64, scope_token_max_bytes):
+        logger.error(f'scope switch: assembled token over {scope_token_max_bytes} bytes; refusing')
+        return {'status': '500', 'statusDescription': 'Internal Server Error',
+                'body': json.dumps({'error': 'scope_exceeds_token_limit'})}
+
+    signature = hmac.new(get_hmac_secret().encode('utf-8'),
+                         f'{header_b64}.{payload_b64}'.encode('utf-8'), hashlib.sha256).digest()
+    signature_b64 = base64.urlsafe_b64encode(signature).decode().rstrip('=')
+    session_cookie_value = f'{header_b64}.{payload_b64}.{signature_b64}'
+
+    # Re-mint the RS256 web_identity token for the new scope, SAME expiry + SAME
+    # principal-tags value as the session cookie (one source, never disagree).
+    wi_additional_claims = {}
+    if additional_claims:
+        wi_additional_claims = ({k: v for k, v in additional_claims.items() if k in whitelist}
+                                if whitelist is not None else dict(additional_claims))
+    try:
+        wi_token = web_identity.mint_web_identity_token(
+            config, WEB_IDENTITY_KEY_REGION,
+            subject=sub,
+            principal_tags_claim=PRINCIPAL_TAGS_CLAIM,
+            principal_tags_value=session_payload.get(PRINCIPAL_TAGS_CLAIM),
+            ttl_exp=ttl_exp,
+            username=username,
+            additional_claims=wi_additional_claims,
+            max_bytes=scope_token_max_bytes,
+        )
+    except Exception as e:
+        logger.error(f'scope switch: web_identity mint failed: {e}')
+        return {'status': '500', 'statusDescription': 'Internal Server Error',
+                'body': json.dumps({'error': 'remint_failed'})}
+
+    # Revoke the PRIOR jti so the old-scope token cannot be replayed after switch.
+    old_jti = session.get('jti')
+    user_id = sub or session.get('email') or username
+    table_name = config.get('dynamodb_table_name')
+    if table_name and user_id and old_jti:
+        try:
+            dynamodb.update_item(
+                TableName=table_name,
+                Key={'pk': {'S': f'SESSION#{user_id}'}, 'sk': {'S': f'SESSION#{old_jti}'}},
+                UpdateExpression='SET revoked = :t',
+                ExpressionAttributeValues={':t': {'BOOL': True}},
+            )
+            logger.info(f'scope switch: revoked prior jti {old_jti}')
+        except Exception as e:
+            logger.error(f'scope switch: failed to revoke prior jti {old_jti}: {e}')
+    # Record the new session so it is a first-class, revocable session.
+    if table_name and user_id:
+        try:
+            dynamodb.put_item(TableName=table_name, Item={
+                'pk': {'S': f'SESSION#{user_id}'}, 'sk': {'S': f'SESSION#{new_jti}'},
+                'gsi1pk': {'S': f'USER#{user_id}'}, 'gsi1sk': {'S': f'SESSION#{int(time.time())}'},
+                'jti': {'S': new_jti}, 'userId': {'S': user_id},
+                'createdAt': {'N': str(int(time.time()))}, 'revoked': {'BOOL': False},
+                'expiresAt': {'N': str(ttl_exp)},
+            })
+        except Exception as e:
+            logger.error(f'scope switch: failed to store new session {new_jti}: {e}')
+
+    expires_str = datetime.utcfromtimestamp(ttl_exp).strftime('%a, %d %b %Y %H:%M:%S GMT')
+    domain_attr = f'; Domain={cookie_domain}' if cookie_domain else ''
+    attrs = f'HttpOnly; Secure; SameSite=Lax; Path=/; Expires={expires_str}{domain_attr}'
+    set_cookie_headers = [
+        {'key': 'Set-Cookie', 'value': f'{cookie_prefix}auth_session={session_cookie_value}; {attrs}'},
+        {'key': 'Set-Cookie', 'value': f'{cookie_prefix}web_identity={wi_token}; {attrs}'},
+    ]
+    return {
+        'status': '200',
+        'statusDescription': 'OK',
+        'headers': {
+            'content-type': [{'key': 'Content-Type', 'value': 'application/json'}],
+            'cache-control': [{'key': 'Cache-Control', 'value': 'no-store'}],
+            'set-cookie': set_cookie_headers,
+        },
+        'body': json.dumps({'scope': requested, 'jti': new_jti}),
+    }
+
+
 def lambda_handler(event, context):
     """Handle OAuth callback from Azure AD"""
     request = event['Records'][0]['cf']['request']
@@ -287,6 +533,16 @@ def lambda_handler(event, context):
         except Exception as e:
             logger.error(f'OIDC discovery: failed to build document: {e}')
             return {'status': '500', 'statusDescription': 'Internal Server Error', 'body': 'Discovery document unavailable'}
+
+    # Scope SWITCH / re-mint (#195 §5.7). The operator is ALREADY authenticated
+    # (they hold a valid session from the OAuth callback); switching brand/estate
+    # must NOT re-run the Entra login. This route reuses the existing session,
+    # re-runs the post-auth resolver hook for the REQUESTED scope, re-mints the
+    # session + web_identity cookies for that scope, and revokes the prior jti.
+    # It is independent of the callback flow and gated on the web_identity
+    # feature (there is no scope to switch without the two-token model).
+    if uri.endswith('/oauth2/switch'):
+        return handle_scope_switch(request)
 
     # Debug logging for cookies
     logger.info(f'Request headers: {json.dumps(request.get("headers", {}))}')
