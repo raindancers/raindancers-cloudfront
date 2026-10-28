@@ -148,16 +148,33 @@ def _public_jwk(key_id, key_region):
     return jwk
 
 
-def mint_web_identity_token(config, key_region, subject, principal_tags_claim, principal_tags_value, ttl_exp, username=None, additional_claims=None, max_bytes=None):
+def mint_web_identity_token(config, key_region, subject, principal_tags_claim, principal_tags_value, ttl_exp, username=None, additional_claims=None, max_bytes=None, principal_tags_map=None):
     """Mint a horton-signed RS256 web-identity JWT via KMS kms:Sign.
 
     - subject: the operator `sub` (same identity as the session cookie).
-    - principal_tags_claim/value: the AWS principal-tags claim key + its already
-      encoded `:k=v:` value (the SAME value stamped on the HMAC cookie), so the
-      brand tag the two tokens carry can never disagree. For the flat-permission
-      model this value carries the brand/scope tag PLUS one `perm=1` tag per
-      granted permission — a multi-key `:brand=acme:subject.read=1:...:` string
-      produced by the resolver's principal-tags map. Omitted when empty.
+    - principal_tags_claim/value: LEGACY colon-string path. The AWS principal-
+      tags claim key + its already-encoded `:k=v:` value (the SAME value stamped
+      on the HMAC cookie). Retained for callers that have not migrated, but the
+      colon-string does NOT produce per-key session tags at STS — see
+      principal_tags_map below.
+    - principal_tags_map: the RAW {name: value} tag map (the resolver's
+      principal_tags). When provided, the token carries the AWS session-tags
+      claim in the shape STS actually parses into per-key session tags:
+
+          "https://aws.amazon.com/tags": {"principal_tags": {"<k>": ["<v>"], ...}}
+
+      This is REQUIRED for the brand/permission tag fence to work:
+      sts:AssumeRoleWithWebIdentity only sets aws:PrincipalTag/<k> for each key
+      in this object. The legacy `:k=v:` colon-string, in contrast, STS stored as
+      a SINGLE tag literally named "Claims" whose value was the whole string — so
+      aws:PrincipalTag/brand.manage never existed and every brand-fenced policy
+      condition failed with AccessDenied (proven 2026-10-28 via CloudTrail +
+      KMS-signed probe: the object form assumes AND the real DynamoDB Query
+      succeeds; the colon-string form is denied). The HMAC session cookie keeps
+      the colon-string (its edge auth-check reads it that way); only the
+      web_identity token the mint signs here switches to the object form.
+      When principal_tags_map is given it takes precedence over
+      principal_tags_claim/value.
     - ttl_exp: absolute `exp` (unix), matched to the session cookie's expiry.
     - username: optional operator UPN (preferred_username) for SCIM resolution;
       added as the `preferred_username` claim when a non-empty string. `sub` is
@@ -174,6 +191,8 @@ def mint_web_identity_token(config, key_region, subject, principal_tags_claim, p
 
     Returns the compact JWS string. The caller delivers it to the client.
     """
+    # The AWS-documented session-tags claim key STS parses into per-key tags.
+    AWS_TAGS_CLAIM = 'https://aws.amazon.com/tags'
     key_id = config['web_identity_signing_key_id']
     issuer = config['web_identity_issuer']
     now = int(time.time())
@@ -190,10 +209,19 @@ def mint_web_identity_token(config, key_region, subject, principal_tags_claim, p
     _RESERVED = {'iss', 'aud', 'sub', 'iat', 'nbf', 'exp', 'jti'}
     if additional_claims:
         for name, value in additional_claims.items():
-            if name in _RESERVED or name == principal_tags_claim:
+            if name in _RESERVED or name == principal_tags_claim or name == AWS_TAGS_CLAIM:
                 continue  # never let a resolver claim shadow a reserved/tag claim
             payload[name] = value
-    if principal_tags_claim and principal_tags_value:
+    if principal_tags_map:
+        # STS-correct session tags: one aws:PrincipalTag/<k> per entry. Values
+        # are single-element string arrays per the AWS claim schema.
+        payload[AWS_TAGS_CLAIM] = {
+            'principal_tags': {
+                str(k): [str(v)] for k, v in principal_tags_map.items()
+            }
+        }
+    elif principal_tags_claim and principal_tags_value:
+        # Legacy colon-string path (no per-key tags at STS; kept for compat).
         payload[principal_tags_claim] = principal_tags_value
     if isinstance(username, str) and username:
         payload['preferred_username'] = username

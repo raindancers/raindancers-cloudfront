@@ -84,6 +84,45 @@ class WebIdentityTests(unittest.TestCase):
         self.assertEqual(payload[claim], ':brand=acme:')
         self.assertTrue(sig_b64)  # signature segment present
 
+    def test_mint_principal_tags_map_emits_aws_tags_object(self):
+        # The STS-correct session-tags claim: a raw tag map becomes
+        # https://aws.amazon.com/tags -> {principal_tags: {k: [v]}}, which STS
+        # parses into per-key aws:PrincipalTag/<k>. This is what makes the
+        # brand/permission policy fence work (the colon-string did NOT —
+        # STS stored it as a single tag named "Claims").
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        token = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='user-sub',
+            principal_tags_claim='https://aws.amazon.com/tags/principal_tags/Claims',
+            principal_tags_value=':brand.manage=1:scope=estate:',
+            ttl_exp=9999999999,
+            principal_tags_map={'brand.manage': '1', 'scope': 'estate', 'operator.manage': '1'},
+        )
+        payload = _b64url_json(token.split('.')[1])
+        # The AWS tags claim is present with per-key principal_tags, array values.
+        self.assertIn('https://aws.amazon.com/tags', payload)
+        tags = payload['https://aws.amazon.com/tags']['principal_tags']
+        self.assertEqual(tags['brand.manage'], ['1'])
+        self.assertEqual(tags['scope'], ['estate'])
+        self.assertEqual(tags['operator.manage'], ['1'])
+        # The raw map takes PRECEDENCE: the legacy colon-string claim is NOT
+        # also written (it would otherwise land as a stray "Claims" tag).
+        self.assertNotIn('https://aws.amazon.com/tags/principal_tags/Claims', payload)
+
+    def test_mint_falls_back_to_colon_string_when_no_map(self):
+        # Backward compat: with no principal_tags_map, the legacy colon-string
+        # claim is still written (for callers that have not migrated).
+        config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
+        claim = 'https://aws.amazon.com/tags/principal_tags/Claims'
+        token = wi.mint_web_identity_token(
+            config, 'ap-southeast-2', subject='u',
+            principal_tags_claim=claim, principal_tags_value=':brand=acme:',
+            ttl_exp=9999999999,
+        )
+        payload = _b64url_json(token.split('.')[1])
+        self.assertEqual(payload[claim], ':brand=acme:')
+        self.assertNotIn('https://aws.amazon.com/tags', payload)
+
     def test_mint_omits_empty_brand_claim(self):
         config = {'web_identity_signing_key_id': 'key-1', 'web_identity_issuer': 'https://admin.example.com'}
         claim = 'https://aws.amazon.com/tags/principal_tags/Claims'

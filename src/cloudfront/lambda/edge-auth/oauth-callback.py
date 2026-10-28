@@ -441,6 +441,11 @@ def handle_scope_switch(request):
             username=username,
             additional_claims=wi_additional_claims,
             max_bytes=scope_token_max_bytes,
+            # Raw tag map -> STS-correct https://aws.amazon.com/tags principal_tags
+            # (per-key aws:PrincipalTag/<k>); the colon-string args stay for the
+            # HMAC side and legacy compat. Without this STS stores one tag named
+            # "Claims" and every brand-fenced policy condition fails (#195).
+            principal_tags_map=scope_principal_tags,
         )
     except Exception as e:
         logger.error(f'scope switch: web_identity mint failed: {e}')
@@ -1051,6 +1056,10 @@ def lambda_handler(event, context):
                     username=payload.get('preferred_username'),
                     additional_claims=wi_additional_claims,
                     max_bytes=scope_token_max_bytes,
+                    # Raw tag map -> STS-correct https://aws.amazon.com/tags
+                    # principal_tags (per-key aws:PrincipalTag/<k>). See the
+                    # switch path + mint docstring (#195 brand-fence fix).
+                    principal_tags_map=scope_principal_tags,
                 )
                 web_identity_cookie = (
                     f'{cookie_prefix}web_identity={wi_token}; '
