@@ -1,6 +1,12 @@
 """
 RS256 web-identity token: the role-assumption half of the two-token model.
 
+Note (0.0.71 republish): 0.0.70 shipped the AWS `principal_tags` session-tags
+fix (#70) and npm ACCEPTED the publish, but npm's registry pipeline stalled and
+never finalized 0.0.70 (absent from the version index; `npm pack` notarget). A
+published version id cannot be re-used, so this behaviour-neutral change cuts a
+fresh version so consumers have an installable artifact carrying the same fix.
+
 The mint signs this token with an ASYMMETRIC KMS key (kms:Sign, RS256) so the
 private key never leaves KMS. STS verifies it against the public half served at
 the JWKS route, via sts:AssumeRoleWithWebIdentity. It carries the SAME
