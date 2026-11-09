@@ -69,6 +69,12 @@ export interface AuthSecretManagerProps {
 export class AuthSecretManager extends constructs.Construct {
   public readonly kmsKey: kms.Key;
   public readonly configSecret: secretsmanager.Secret;
+  /**
+   * The exact secretStringTemplate behind the config secret. CloudFormation
+   * generates a NEW hmac_key whenever this changes, so the KVS copy must re-run
+   * whenever it changes: feed it to AuthLambdaFunctions as `configSecretTemplate`.
+   */
+  public readonly configSecretTemplate: string;
   public readonly kvs: cloudfront.KeyValueStore;
   /**
    * Asymmetric (RSA_2048 SIGN_VERIFY) KMS key the mint uses to sign the RS256
@@ -159,11 +165,12 @@ export class AuthSecretManager extends constructs.Construct {
       configTemplate.web_identity_signing_key_id = this.webIdentityKey.keyId;
       configTemplate.web_identity_issuer = props.webIdentityIssuer!;
     }
+    this.configSecretTemplate = JSON.stringify(configTemplate);
     this.configSecret = new secretsmanager.Secret(this, 'ConfigSecret', {
       secretName: configSecretName,
       encryptionKey: this.kmsKey,
       generateSecretString: {
-        secretStringTemplate: JSON.stringify(configTemplate),
+        secretStringTemplate: this.configSecretTemplate,
         generateStringKey: 'hmac_key',
         excludePunctuation: true,
         passwordLength: 64,

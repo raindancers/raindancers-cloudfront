@@ -149,6 +149,7 @@ export class CognitoSessionBackend extends constructs.Construct {
 
     const lambdaFunctions = new AuthLambdaFunctions(this, 'LambdaFunctions', {
       configSecret: secretManager.configSecret,
+      configSecretTemplate: secretManager.configSecretTemplate,
       kmsKey: secretManager.kmsKey,
       kvs: secretManager.kvs,
       authTable: authSecurityTable.table,

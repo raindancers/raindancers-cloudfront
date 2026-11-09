@@ -79,6 +79,12 @@ def copy_secret_to_kvs(secret_arn, kvs_arn):
         IfMatch=etag
     )
     
+    # Read it back. A copy that did not land must fail loudly: the edge would
+    # otherwise reject every session minted with the new key (#206).
+    landed = cf_client.get_key(KvsARN=kvs_arn, Key='jwt.secret')['Value']
+    if landed != new_secret:
+        raise RuntimeError('KVS jwt.secret does not match the Secrets Manager hmac_key after copy')
+
     logger.info('New secret copied to CloudFront KVS successfully')
     logger.info('Dual-secret rotation complete: jwt.secret (new) + jwt.secret.old (previous)')
 

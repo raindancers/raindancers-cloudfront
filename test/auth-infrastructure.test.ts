@@ -125,3 +125,55 @@ describe('AuthInfrastructure — RS256 web-identity half (two-token model)', () 
       .toThrow(/webIdentityIssuer/);
   });
 });
+
+describe('AuthInfrastructure — KVS HMAC key stays in sync with the secret (#206)', () => {
+  // CloudFormation generates a NEW hmac_key whenever the config secret's
+  // GenerateSecretString template changes. The KVS copy must re-run exactly
+  // then, or the edge validates sessions against a stale key and every login
+  // loops with "Invalid or reused state token".
+  function build(stackId: string, extra: Record<string, unknown> = {}): Template {
+    const app = new core.App();
+    const stack = new core.Stack(app, stackId, { env: { account: '123456789012', region: 'ap-southeast-2' } });
+    new AuthInfrastructure(stack, 'Auth', {
+      zoneName: 'admin.example.com',
+      tenantId: 'tenant-123',
+      clientId: 'client-abc',
+      oauth2CallbackRoleName: 'oauth2-callback-role',
+      appSpec: { name: 'admin' },
+      ...extra,
+    });
+    return Template.fromStack(stack);
+  }
+
+  function copyProps(template: Template): any {
+    const res = Object.values(template.findResources('AWS::CloudFormation::CustomResource')) as any[];
+    const copy = res.find((r) => r.Properties?.SecretArn && r.Properties?.KvsArn);
+    expect(copy).toBeDefined();
+    return copy.Properties;
+  }
+
+  test('the copy resource carries the secret template, so it re-runs when the secret is regenerated', () => {
+    const props = copyProps(build('CopyTplStack'));
+    expect(JSON.stringify(props.SecretTemplate)).toContain('azure_tenant_id');
+  });
+
+  test('changing the config (which regenerates the key) changes the copy resource properties', () => {
+    const before = copyProps(build('CopyOffStack', { enableRefresh: false }));
+    const after = copyProps(build('CopyOnStack', { enableRefresh: true }));
+    expect(JSON.stringify(after.SecretTemplate)).not.toEqual(JSON.stringify(before.SecretTemplate));
+  });
+
+  test('an unchanged config gives identical properties (no churn on every deploy)', () => {
+    const a = copyProps(build('CopyStableA'));
+    const b = copyProps(build('CopyStableB'));
+    expect(JSON.stringify(a.SecretTemplate)).toEqual(JSON.stringify(b.SecretTemplate));
+  });
+
+  test('alarms fire when either writer of the KVS key fails', () => {
+    const template = build('CopyAlarmStack');
+    const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm')) as any[];
+    const errorAlarms = alarms.filter((a) => a.Properties.MetricName === 'Errors' && a.Properties.Namespace === 'AWS/Lambda');
+    expect(errorAlarms.length).toBeGreaterThanOrEqual(2);
+    expect(errorAlarms.every((a) => a.Properties.TreatMissingData === 'notBreaching')).toBe(true);
+  });
+});
