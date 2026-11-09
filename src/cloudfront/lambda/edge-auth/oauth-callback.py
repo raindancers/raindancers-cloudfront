@@ -1,4 +1,5 @@
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
 from jwt import PyJWK
@@ -340,13 +341,57 @@ def handle_scope_switch(request):
         return {'status': '400', 'statusDescription': 'Bad Request',
                 'body': json.dumps({'error': 'missing_scope'})}
 
+    err, set_cookie_headers, new_jti = _remint_session(
+        config, session, requested,
+        ttl_exp=int(session.get('exp', int(time.time()) + 3600)),
+        cookie_prefix=cookie_prefix, cookie_domain=cookie_domain,
+    )
+    if err:
+        return err
+    return {
+        'status': '200',
+        'statusDescription': 'OK',
+        'headers': {
+            'content-type': [{'key': 'Content-Type', 'value': 'application/json'}],
+            'cache-control': [{'key': 'Cache-Control', 'value': 'no-store'}],
+            'set-cookie': set_cookie_headers,
+        },
+        'body': json.dumps({'scope': requested, 'jti': new_jti}),
+    }
+
+
+def _cookie_expiry_ts(config, token_exp):
+    """Absolute expiry (unix) for the session cookies.
+
+    The browser DELETES a cookie at its Expires, so a cookie that expires with
+    its JWT is never sent again and the edge never sees an expired-but-valid
+    session to refresh. When refresh is enabled the cookie therefore outlives
+    the JWT, for the refresh-token window (config ``refresh_cookie_ttl_secs``,
+    default 30 days); the JWT ``exp`` inside it is unchanged and still enforced.
+    """
+    if str(config.get('enable_refresh', 'false')).lower() != 'true':
+        return token_exp
+    window = int(config.get('refresh_cookie_ttl_secs', 30 * 24 * 60 * 60))
+    return max(token_exp, int(time.time()) + window)
+
+
+def _remint_session(config, session, requested, ttl_exp, cookie_prefix, cookie_domain):
+    """Re-run the resolver hook for ``requested`` scope and mint a fresh pair of
+    cookies (HS256 session + RS256 web_identity), revoking the prior jti.
+
+    Shared by the scope switch and the silent refresh: ONE mint path, so the
+    kms:Sign authority stays in this function and is never cloned.
+
+    Returns ``(error_response, None, None)`` on failure (fail closed) or
+    ``(None, set_cookie_headers, new_jti)`` on success.
+    """
     sub = session.get('sub')
     username = session.get('preferred_username')
     hook_url = config.get('post_auth_hook_url')
     if not hook_url:
         # Without the resolver there is no per-scope authority to mint.
         logger.error('scope switch: no post_auth_hook_url configured')
-        return {'status': '404', 'statusDescription': 'Not Found', 'body': 'Not found'}
+        return ({'status': '404', 'statusDescription': 'Not Found', 'body': 'Not found'}, None, None)
 
     # Re-run the resolver hook for the REQUESTED scope. Identical call shape to
     # the callback's hook, plus `requested_scope` — the resolver honours it and
@@ -377,15 +422,15 @@ def handle_scope_switch(request):
             scope_principal_tags = hook_result.get('principal_tags', {})
     except Exception as e:
         logger.error(f'scope switch: resolver hook failed: {e}')
-        return {'status': '503', 'statusDescription': 'Service Unavailable',
-                'body': json.dumps({'error': 'scope_resolution_unavailable'})}
+        return ({'status': '503', 'statusDescription': 'Service Unavailable',
+                'body': json.dumps({'error': 'scope_resolution_unavailable'})}, None, None)
 
     # A resolver that returned no scope tag for the requested scope means the
     # caller does not hold it: refuse rather than mint an empty-authority token.
     if not scope_principal_tags:
         logger.warning(f'scope switch: caller {sub} does not hold scope {requested}')
-        return {'status': '403', 'statusDescription': 'Forbidden',
-                'body': json.dumps({'error': 'scope_not_held'})}
+        return ({'status': '403', 'statusDescription': 'Forbidden',
+                'body': json.dumps({'error': 'scope_not_held'})}, None, None)
 
     # Build the new session payload — same shape and whitelist discipline as the
     # callback mint, carrying the resolver's new-scope claims + principal tags.
@@ -397,12 +442,12 @@ def handle_scope_switch(request):
         base_claims = {k: v for k, v in base_claims.items() if k in whitelist or k in ('sub', 'exp', 'iss', 'idp')}
 
     new_jti = f'sess_{uuid.uuid4().hex}'
-    ttl_exp = int(session.get('exp', int(time.time()) + 3600))
     session_payload = {
         **base_claims,
         **additional_claims,
         'jti': new_jti,
         'iat': int(time.time()),
+        'exp': ttl_exp,
     }
     encoded_tags = encode_principal_tags(scope_principal_tags)
     if encoded_tags is not None:
@@ -417,8 +462,8 @@ def handle_scope_switch(request):
     scope_token_max_bytes = int(config.get('scope_token_max_bytes', '7168'))
     if scope_token_exceeds(header_b64, payload_b64, scope_token_max_bytes):
         logger.error(f'scope switch: assembled token over {scope_token_max_bytes} bytes; refusing')
-        return {'status': '500', 'statusDescription': 'Internal Server Error',
-                'body': json.dumps({'error': 'scope_exceeds_token_limit'})}
+        return ({'status': '500', 'statusDescription': 'Internal Server Error',
+                'body': json.dumps({'error': 'scope_exceeds_token_limit'})}, None, None)
 
     signature = hmac.new(get_hmac_secret().encode('utf-8'),
                          f'{header_b64}.{payload_b64}'.encode('utf-8'), hashlib.sha256).digest()
@@ -449,8 +494,8 @@ def handle_scope_switch(request):
         )
     except Exception as e:
         logger.error(f'scope switch: web_identity mint failed: {e}')
-        return {'status': '500', 'statusDescription': 'Internal Server Error',
-                'body': json.dumps({'error': 'remint_failed'})}
+        return ({'status': '500', 'statusDescription': 'Internal Server Error',
+                'body': json.dumps({'error': 'remint_failed'})}, None, None)
 
     # Revoke the PRIOR jti so the old-scope token cannot be replayed after switch.
     old_jti = session.get('jti')
@@ -480,22 +525,187 @@ def handle_scope_switch(request):
         except Exception as e:
             logger.error(f'scope switch: failed to store new session {new_jti}: {e}')
 
-    expires_str = datetime.utcfromtimestamp(ttl_exp).strftime('%a, %d %b %Y %H:%M:%S GMT')
+    cookie_exp = _cookie_expiry_ts(config, ttl_exp)
+    expires_str = datetime.utcfromtimestamp(cookie_exp).strftime('%a, %d %b %Y %H:%M:%S GMT')
     domain_attr = f'; Domain={cookie_domain}' if cookie_domain else ''
     attrs = f'HttpOnly; Secure; SameSite=Lax; Path=/; Expires={expires_str}{domain_attr}'
     set_cookie_headers = [
         {'key': 'Set-Cookie', 'value': f'{cookie_prefix}auth_session={session_cookie_value}; {attrs}'},
         {'key': 'Set-Cookie', 'value': f'{cookie_prefix}web_identity={wi_token}; {attrs}'},
     ]
+    return None, set_cookie_headers, new_jti
+
+
+def exchange_refresh_token(refresh_token, azure_tenant_id, azure_client_id, sts_audience):
+    """Exchange a stored Entra refresh token for a new token set.
+
+    Same federated client assertion as the code exchange. Raises
+    urllib.error.HTTPError when Entra refuses (expired / revoked token).
+    """
+    token_url = f'https://login.microsoftonline.com/{azure_tenant_id}/oauth2/v2.0/token'
+    data = {
+        'grant_type': 'refresh_token',
+        'client_id': azure_client_id,
+        'refresh_token': refresh_token,
+        'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+        'client_assertion': get_federated_token(sts_audience),
+    }
+    req = urllib.request.Request(
+        token_url,
+        data=urllib.parse.urlencode(data).encode('utf-8'),
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+
+def _safe_return_to(config, request, return_to):
+    """Allow only a relative path, or an absolute URL on an allowed domain."""
+    if not return_to:
+        return '/'
+    if return_to.startswith('//') or return_to.startswith('\\'):
+        return '/'
+    if return_to.startswith('http'):
+        allowed = json.loads(config.get('allowed_domains', '[]'))
+        host = urllib.parse.urlparse(return_to).hostname
+        if not host or not any(host == d or host.endswith('.' + d) for d in allowed):
+            return '/'
+        return return_to
+    return return_to if return_to.startswith('/') else '/'
+
+
+def _refresh_to_login(config, request, cookie_prefix, cookie_domain):
+    """Refresh failed: send the user to login and clear the dead session cookie,
+    so the next load starts a clean Entra login instead of looping here."""
+    host = (request.get('headers', {}).get('host') or [{}])[0].get('value', '')
+    qs = request.get('querystring', '') or ''
+    return_to = '/'
+    for pair in qs.split('&'):
+        if pair.startswith('return_to='):
+            return_to = urllib.parse.unquote(pair[len('return_to='):])
+    return_to = _safe_return_to(config, request, return_to)
+    domain_attr = f'; Domain={cookie_domain}' if cookie_domain else ''
+    clear = f'HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0{domain_attr}'
+    # Landing on return_to without a session makes the auth-check function start
+    # the normal Entra login (with PKCE/state) - no authorize URL is built here.
     return {
-        'status': '200',
-        'statusDescription': 'OK',
+        'status': '302',
+        'statusDescription': 'Found',
         'headers': {
-            'content-type': [{'key': 'Content-Type', 'value': 'application/json'}],
+            'location': [{'key': 'Location', 'value': return_to}],
+            'cache-control': [{'key': 'Cache-Control', 'value': 'no-store'}],
+            'set-cookie': [
+                {'key': 'Set-Cookie', 'value': f'{cookie_prefix}auth_session=; {clear}'},
+                {'key': 'Set-Cookie', 'value': f'{cookie_prefix}web_identity=; {clear}'},
+            ],
+        },
+    }
+
+
+def handle_refresh(request):
+    """Silent session renewal: GET /oauth2/refresh?return_to=<path>.
+
+    The edge auth-check sends an expired-but-validly-signed session here. This
+    route (1) verifies the session signature, ignoring exp; (2) loads the
+    stored Entra refresh token for that session's jti; (3) exchanges it with
+    Entra (which re-checks the user is still enabled); (4) re-runs the resolver
+    hook for the session's current scope and re-mints BOTH cookies through the
+    same ``_remint_session`` the scope switch uses; (5) rotates the stored
+    refresh token to the new jti; (6) redirects back to return_to.
+
+    Any failure sends the user to a clean login. Nothing here widens authority:
+    the resolver is asked again, so a removed assignment is dropped on refresh.
+    """
+    try:
+        config = get_config_cached()
+    except Exception as e:
+        logger.error(f'refresh: failed to load config: {e}')
+        return {'status': '500', 'statusDescription': 'Internal Server Error', 'body': 'Configuration error'}
+
+    if not web_identity.is_enabled(config) or str(config.get('enable_refresh', 'false')).lower() != 'true':
+        return {'status': '404', 'statusDescription': 'Not Found', 'body': 'Not found'}
+
+    cookie_domain = config.get('cookie_domain', '')
+    cookie_prefix = '__Secure-' if cookie_domain else '__Host-'
+    cookies = _parse_request_cookies(request)
+    session = _verify_session_cookie(cookies, cookie_prefix)
+    if not session or not session.get('jti'):
+        return _refresh_to_login(config, request, cookie_prefix, cookie_domain)
+
+    old_jti = session['jti']
+    table_name = config.get('dynamodb_table_name')
+    if not table_name:
+        return _refresh_to_login(config, request, cookie_prefix, cookie_domain)
+
+    try:
+        item = dynamodb.get_item(
+            TableName=table_name,
+            Key={'pk': {'S': f'REFRESH#{old_jti}'}, 'sk': {'S': f'REFRESH#{old_jti}'}},
+        ).get('Item')
+    except Exception as e:
+        logger.error(f'refresh: DynamoDB read failed: {e}')
+        return {'status': '503', 'statusDescription': 'Service Unavailable', 'body': 'Service temporarily unavailable'}
+    if not item:
+        logger.warning(f'refresh: no refresh token for {old_jti}')
+        return _refresh_to_login(config, request, cookie_prefix, cookie_domain)
+
+    try:
+        token_response = exchange_refresh_token(
+            item['refresh_token']['S'],
+            config['azure_tenant_id'],
+            config['azure_client_id'],
+            config.get('sts_audience', 'sts.amazonaws.com'),
+        )
+    except urllib.error.HTTPError as e:
+        logger.error(f'refresh: Entra refused the refresh token ({e.code})')
+        return _refresh_to_login(config, request, cookie_prefix, cookie_domain)
+    except Exception as e:
+        logger.error(f'refresh: Entra exchange error: {e}')
+        return {'status': '503', 'statusDescription': 'Service Unavailable', 'body': 'Authentication service unavailable'}
+
+    ttl_exp = int(time.time()) + int(token_response.get('expires_in', 3600))
+    err, set_cookie_headers, new_jti = _remint_session(
+        config, session, session.get('scope'),
+        ttl_exp=ttl_exp, cookie_prefix=cookie_prefix, cookie_domain=cookie_domain,
+    )
+    if err:
+        # Includes scope_not_held: the user lost the scope, so log in afresh.
+        logger.warning(f'refresh: re-mint refused ({err.get("status")})')
+        return _refresh_to_login(config, request, cookie_prefix, cookie_domain)
+
+    # Rotate the stored refresh token onto the new jti, then drop the old one.
+    new_refresh = token_response.get('refresh_token') or item['refresh_token']['S']
+    try:
+        now = int(time.time())
+        dynamodb.put_item(TableName=table_name, Item={
+            'pk': {'S': f'REFRESH#{new_jti}'}, 'sk': {'S': f'REFRESH#{new_jti}'},
+            'refresh_token': {'S': new_refresh},
+            'user_id': item.get('user_id', {'S': ''}),
+            'customer_id': item.get('customer_id', {'S': ''}),
+            'createdAt': {'N': str(now)},
+            'expiresAt': {'N': str(now + 30 * 24 * 60 * 60)},
+        })
+        dynamodb.delete_item(
+            TableName=table_name,
+            Key={'pk': {'S': f'REFRESH#{old_jti}'}, 'sk': {'S': f'REFRESH#{old_jti}'}},
+        )
+    except Exception as e:
+        # The cookies are already minted; the next expiry would send to login.
+        logger.error(f'refresh: refresh-token rotation failed: {e}')
+
+    qs = request.get('querystring', '') or ''
+    return_to = '/'
+    for pair in qs.split('&'):
+        if pair.startswith('return_to='):
+            return_to = urllib.parse.unquote(pair[len('return_to='):])
+    return {
+        'status': '302',
+        'statusDescription': 'Found',
+        'headers': {
+            'location': [{'key': 'Location', 'value': _safe_return_to(config, request, return_to)}],
             'cache-control': [{'key': 'Cache-Control', 'value': 'no-store'}],
             'set-cookie': set_cookie_headers,
         },
-        'body': json.dumps({'scope': requested, 'jti': new_jti}),
     }
 
 
@@ -548,6 +758,11 @@ def lambda_handler(event, context):
     # feature (there is no scope to switch without the two-token model).
     if uri.endswith('/oauth2/switch'):
         return handle_scope_switch(request)
+
+    # Silent renewal of an expired-but-validly-signed session (needs
+    # enable_refresh + the web_identity feature). Same re-mint path as /switch.
+    if uri.endswith('/oauth2/refresh'):
+        return handle_refresh(request)
 
     # Debug logging for cookies
     logger.info(f'Request headers: {json.dumps(request.get("headers", {}))}')
@@ -1000,7 +1215,8 @@ def lambda_handler(event, context):
         
         # Calculate expiry from Azure AD token
         azure_exp_timestamp = payload.get('exp', int(time.time()) + 3600)
-        expires = datetime.utcfromtimestamp(azure_exp_timestamp)
+        # With refresh on, the cookie outlives the JWT (see _cookie_expiry_ts).
+        expires = datetime.utcfromtimestamp(_cookie_expiry_ts(config, azure_exp_timestamp))
         expires_str = expires.strftime('%a, %d %b %Y %H:%M:%S GMT')
         logger.info(f'Cookie expiry set to: {expires_str}')
         
