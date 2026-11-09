@@ -123,3 +123,21 @@ describe('Expired-JWT refresh redirect (Task 1.4)', () => {
     });
   });
 });
+
+describe('Entra authorize request asks for offline_access only when refresh is on', () => {
+  const authorizeUrl = async (enableRefresh: boolean) => {
+    const { handler } = createHandler(enableRefresh);
+    const result = await handler(createAuthenticatedEvent(createTamperedToken({})));
+    return decodeURIComponent(result.headers.location.value);
+  };
+
+  it('refresh enabled: scope includes offline_access (else Entra sends no refresh token)', async () => {
+    expect(await authorizeUrl(true)).toContain('scope=openid profile email offline_access');
+  });
+
+  it('refresh disabled: scope is unchanged', async () => {
+    const url = await authorizeUrl(false);
+    expect(url).toContain('scope=openid profile email&');
+    expect(url).not.toContain('offline_access');
+  });
+});

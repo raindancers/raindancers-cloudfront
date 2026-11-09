@@ -110,7 +110,7 @@ function buildAzureAuthUrl(state, codeChallenge, host) {
         'client_id=' + encodeURIComponent(AZURE_CLIENT_ID),
         'redirect_uri=' + encodeURIComponent(redirectUri),
         'response_type=code',
-        'scope=' + encodeURIComponent('openid profile email'),
+        'scope=' + encodeURIComponent(ENABLE_REFRESH ? 'openid profile email offline_access' : 'openid profile email'),
         'state=' + encodeURIComponent(state),
         'code_challenge=' + encodeURIComponent(codeChallenge),
         'code_challenge_method=S256'

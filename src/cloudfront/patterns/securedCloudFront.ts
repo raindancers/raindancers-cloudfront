@@ -124,7 +124,15 @@ export interface CloudFrontWithAzureAuthSplitProps<TRole extends string = string
   readonly enableHeaderInjection?: boolean;
   /** Map of HTTP header name to JWT claim key for header injection. Only used when enableHeaderInjection is true. e.g. { 'x-customer-id': 'customer_id', 'x-customer-email': 'email' } */
   readonly headerInjectionClaims?: Record<string, string>;
-  /** Enable the /oauth2/refresh endpoint for silent token renewal. When true, expired-but-valid tokens redirect to refresh instead of Entra login. @default false */
+  /**
+   * Enable the /oauth2/refresh endpoint for silent token renewal. When true, expired-but-valid
+   * tokens redirect to refresh instead of Entra login, the Entra authorize request adds
+   * `offline_access` (so a refresh token is issued), and the session cookies outlive the JWT.
+   * With `enableWebIdentityToken` the OAuth callback function serves the route and re-mints
+   * BOTH cookies; otherwise a standalone HMAC-only refresh Lambda is deployed.
+   * The auth config secret must also have `enable_refresh` true (AuthInfrastructure `enableRefresh`).
+   * @default false
+   */
   readonly enableRefreshEndpoint?: boolean;
   /** Enable the /oauth2/logout endpoint for explicit session termination. When true, deploys a Logout Lambda that clears cookies, revokes the session, and redirects to Entra /logout. @default false */
   readonly enableLogoutEndpoint?: boolean;
@@ -429,6 +437,7 @@ def get_config():
     }
 
     const additionalBehaviors: Record<string, cloudfront.BehaviorOptions> = {};
+    let refreshRoutedToCallback = false;
 
     if (props.createOAuthCallback !== false) {
       // Retain old Lambda@Edge versions — CloudFront edge replicas take up to
@@ -503,11 +512,28 @@ def get_config():
           }],
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
         };
+        // Silent refresh with the two-token model: the SAME EdgeFunction handles
+        // /oauth2/refresh, so the session AND the RS256 web_identity cookie are
+        // re-minted through the one path that holds kms:Sign. The standalone
+        // refresh Lambda below only renews the HMAC session and would leave the
+        // web_identity cookie expired, so it is not deployed in this mode.
+        if (this.enableRefreshEndpoint) {
+          additionalBehaviors['/oauth2/refresh'] = {
+            origin: props.defaultBehavior.origin,
+            viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            edgeLambdas: [{
+              functionVersion: oauthCallbackFunction.currentVersion,
+              eventType: cloudfront.LambdaEdgeEventType.VIEWER_REQUEST,
+            }],
+            cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          };
+          refreshRoutedToCallback = true;
+        }
       }
     }
 
-    // Deploy Refresh Lambda when enableRefreshEndpoint is true
-    if (this.enableRefreshEndpoint) {
+    // Deploy Refresh Lambda when enableRefreshEndpoint is true (HMAC-only mode)
+    if (this.enableRefreshEndpoint && !refreshRoutedToCallback) {
       const refreshFunction = new cloudfront.experimental.EdgeFunction(this, 'RefreshEndpoint', {
         runtime: lambda.Runtime.PYTHON_3_11,
         handler: 'index.lambda_handler',
