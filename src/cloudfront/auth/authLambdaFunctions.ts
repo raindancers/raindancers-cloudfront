@@ -14,12 +14,21 @@ import {
   aws_sns as sns,
   aws_sns_subscriptions as sns_subscriptions,
   aws_dynamodb as dynamodb,
+  aws_cloudwatch as cloudwatch,
   CustomResource,
 } from 'aws-cdk-lib';
 import * as constructs from 'constructs';
 
 export interface AuthLambdaFunctionsProps {
   readonly configSecret: secretsmanager.Secret;
+  /**
+   * The config secret's secretStringTemplate. CloudFormation regenerates the
+   * secret (a new hmac_key) whenever the template changes, which leaves the KVS
+   * copy stale and every freshly minted session failing the edge check. Passing
+   * it makes the KVS copy re-run exactly when the secret is regenerated, and
+   * never on an unchanged deploy (unlike a timestamp nonce).
+   */
+  readonly configSecretTemplate?: string;
   readonly kmsKey: kms.Key;
   readonly kvs: cloudfront.KeyValueStore;
   readonly authTable: dynamodb.ITable;
@@ -34,6 +43,12 @@ export class AuthLambdaFunctions extends constructs.Construct {
   public readonly streamProcessorLambda: lambda.Function;
   public readonly sessionRevocationLambda?: lambda.Function;
   public readonly logGroups: logs.LogGroup[];
+  /**
+   * Alarms that fire when either writer of the KVS HMAC key fails (the
+   * scheduled rotation, or the copy). A failed copy leaves the edge validating
+   * sessions against a stale key. No action is attached; wire one if wanted.
+   */
+  public readonly kvsSyncAlarms: cloudwatch.Alarm[] = [];
 
   constructor(scope: constructs.Construct, id: string, props: AuthLambdaFunctionsProps) {
     super(scope, id);
@@ -102,6 +117,7 @@ export class AuthLambdaFunctions extends constructs.Construct {
       properties: {
         SecretArn: props.configSecret.secretArn,
         KvsArn: props.kvs.keyValueStoreArn,
+        ...(props.configSecretTemplate ? { SecretTemplate: props.configSecretTemplate } : {}),
       },
     });
 
@@ -133,6 +149,17 @@ export class AuthLambdaFunctions extends constructs.Construct {
     props.configSecret.grantWrite(this.rotateSecretLambda);
     props.kmsKey.grantEncryptDecrypt(this.rotateSecretLambda);
     this.copySecretLambda.grantInvoke(this.rotateSecretLambda);
+
+    for (const [alarmId, fn] of [['RotateSecretErrors', this.rotateSecretLambda], ['CopySecretToKvsErrors', this.copySecretLambda]] as const) {
+      this.kvsSyncAlarms.push(new cloudwatch.Alarm(this, alarmId, {
+        alarmDescription: 'The HMAC key was not synced to the CloudFront KVS. The edge will reject new sessions until it is.',
+        metric: fn.metricErrors({ period: core.Duration.hours(1), statistic: 'Sum' }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }));
+    }
 
     new events.Rule(this, 'RotationSchedule', {
       schedule: events.Schedule.rate(rotationSchedule),

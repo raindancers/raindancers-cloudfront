@@ -36,6 +36,8 @@ export interface CognitoAuthSecretManagerProps {
 export class CognitoAuthSecretManager extends constructs.Construct {
   public readonly kmsKey: kms.Key;
   public readonly configSecret: secretsmanager.Secret;
+  /** The exact secretStringTemplate; CloudFormation regenerates hmac_key when it changes. See AuthSecretManager. */
+  public readonly configSecretTemplate: string;
   public readonly kvs: cloudfront.KeyValueStore;
 
   constructor(scope: constructs.Construct, id: string, props: CognitoAuthSecretManagerProps) {
@@ -78,25 +80,27 @@ export class CognitoAuthSecretManager extends constructs.Construct {
       }
       : {};
 
+    this.configSecretTemplate = JSON.stringify({
+      idp_type: 'cognito',
+      cognito_user_pool_id: props.userPoolId,
+      cognito_client_id: props.clientId,
+      cognito_domain: props.cognitoDomain,
+      cognito_region: props.cognitoRegion,
+      redirect_uri: `https://${props.domainName}/oauth2/callback`,
+      dynamodb_table_name: props.tableName,
+      dynamodb_region: props.tableRegion,
+      security_alerts_topic_arn: props.securityAlertsTopicArn ?? '',
+      auto_revoke_on_reuse: props.autoRevokeOnReuse ? 'true' : 'false',
+      jwt_claims_whitelist: JSON.stringify(jwtClaimsWhitelist),
+      allowed_domains: JSON.stringify([props.domainName]),
+      ...resolverKeys,
+    });
+
     this.configSecret = new secretsmanager.Secret(this, 'ConfigSecret', {
       secretName: props.configSecretName ?? `cloudfront-auth-config-${props.domainName}`,
       encryptionKey: this.kmsKey,
       generateSecretString: {
-        secretStringTemplate: JSON.stringify({
-          idp_type: 'cognito',
-          cognito_user_pool_id: props.userPoolId,
-          cognito_client_id: props.clientId,
-          cognito_domain: props.cognitoDomain,
-          cognito_region: props.cognitoRegion,
-          redirect_uri: `https://${props.domainName}/oauth2/callback`,
-          dynamodb_table_name: props.tableName,
-          dynamodb_region: props.tableRegion,
-          security_alerts_topic_arn: props.securityAlertsTopicArn ?? '',
-          auto_revoke_on_reuse: props.autoRevokeOnReuse ? 'true' : 'false',
-          jwt_claims_whitelist: JSON.stringify(jwtClaimsWhitelist),
-          allowed_domains: JSON.stringify([props.domainName]),
-          ...resolverKeys,
-        }),
+        secretStringTemplate: this.configSecretTemplate,
         generateStringKey: 'hmac_key',
         excludePunctuation: true,
         passwordLength: 64,
