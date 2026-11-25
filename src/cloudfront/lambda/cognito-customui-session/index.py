@@ -30,6 +30,7 @@ from datetime import datetime
 
 import boto3
 import rsa
+from botocore.config import Config
 
 from config_generated import get_config
 
@@ -42,6 +43,7 @@ CONFIG = None
 HMAC_SECRET = None
 HOOK_SECRET = None
 SCOPE_SECRET = None
+RELAY_CLIENT = None
 JWKS_CACHE = None
 
 
@@ -163,8 +165,53 @@ def validate_id_token(id_token, client_id, user_pool_id, cognito_region):
     return claims
 
 
+def get_relay_client(config):
+    """Lambda client for the hook relay (cached). One attempt, so a slow relay is not retried."""
+    global RELAY_CLIENT
+    if RELAY_CLIENT is None:
+        timeout = int(config.get('post_auth_hook_relay_timeout', '3'))
+        RELAY_CLIENT = boto3.client(
+            'lambda',
+            region_name=config['post_auth_hook_relay_region'],
+            config=Config(retries={'max_attempts': 1}, connect_timeout=2, read_timeout=timeout),
+        )
+    return RELAY_CLIENT
+
+
+def call_hook_relay(config, identity):
+    """Call the identity-linking hook through the hook relay Lambda (lambda:Invoke).
+
+    The relay runs in the VPC and calls the hook on a private address. Returns
+    (status_code, body_dict) like call_identity_hook. A failure of the relay itself
+    (a function error, a timeout, a bad reply) returns 503, so the caller issues no
+    session and answers identity_unavailable, the same as a hook that answers 5xx.
+    """
+    try:
+        resp = get_relay_client(config).invoke(
+            FunctionName=config['post_auth_hook_relay_arn'],
+            InvocationType='RequestResponse',
+            Payload=json.dumps(identity, separators=(',', ':')).encode('utf-8'),
+        )
+        if resp.get('FunctionError'):
+            logger.error(f"hook relay function error: {resp.get('FunctionError')}")
+            return 503, {}
+        reply = json.loads(resp['Payload'].read().decode('utf-8'))
+        body = reply.get('body', {})
+        return int(reply['status']), body if isinstance(body, dict) else {}
+    except Exception as e:
+        # Only the error type: the exception text can carry the payload.
+        logger.error(f'hook relay call failed: {type(e).__name__}')
+        return 503, {}
+
+
 def call_identity_hook(hook_url, identity):
-    """Call the identity-linking hook. Returns (status_code, body_dict)."""
+    """Call the identity-linking hook. Returns (status_code, body_dict).
+
+    When a hook relay is configured the call goes through it and hook_url is not used.
+    """
+    config = get_config_cached()
+    if config.get('post_auth_hook_relay_arn'):
+        return call_hook_relay(config, identity)
     data = json.dumps(identity, separators=(',', ':')).encode('utf-8')
     headers = {'Content-Type': 'application/json'}
     secret = get_hook_secret()
@@ -265,6 +312,7 @@ def lambda_handler(event, context):
         cognito_region = config['cognito_region']
         table_name = config.get('dynamodb_table_name')
         hook_url = config.get('post_auth_hook_url', '')
+        hook_relay_arn = config.get('post_auth_hook_relay_arn', '')
         allowed_domains = json.loads(config.get('allowed_domains', '[]'))
         session_ttl = int(config.get('session_ttl_seconds', '3600'))
         refresh_ttl_days = int(config.get('refresh_ttl_days', '30'))
@@ -294,7 +342,7 @@ def lambda_handler(event, context):
 
     # 2. Resolve the Medusa customer via the identity-linking hook.
     customer_id = ''
-    if hook_url:
+    if hook_url or hook_relay_arn:
         status, hook_body = call_identity_hook(hook_url, {
             'sub': sub, 'email': email, 'provider': 'cognito',
         })

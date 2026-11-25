@@ -24,6 +24,11 @@ sys.path.insert(0, HANDLER_DIR)
 # --- Stub module-level imports the handler makes before we import it ----------
 sys.modules.setdefault('boto3', types.SimpleNamespace(client=lambda *a, **k: None))
 sys.modules.setdefault('rsa', types.ModuleType('rsa'))
+_botocore = types.ModuleType('botocore')
+_botocore_config = types.ModuleType('botocore.config')
+_botocore_config.Config = lambda **k: k
+sys.modules.setdefault('botocore', _botocore)
+sys.modules.setdefault('botocore.config', _botocore_config)
 
 _BASE_CONFIG = {
     'cognito_client_id': 'client-123',
