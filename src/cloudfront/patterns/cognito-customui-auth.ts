@@ -100,10 +100,38 @@ export interface CognitoCustomUiAuthProps<TRole extends string = string> {
   readonly enableRefreshEndpoint?: boolean;
   /** Mount the logout endpoint at '/oauth2/logout' (POST). @default true */
   readonly enableLogoutEndpoint?: boolean;
-  /** URL of the identity-linking hook the issuance endpoint calls to resolve customer_id. */
-  readonly identityLinkingHookUrl: string;
-  /** Secrets Manager ARN of the shared secret used to authenticate to the hook. */
+  /**
+   * URL of the identity-linking hook the issuance endpoint calls to resolve customer_id.
+   * Set this, or {@link identityLinkingHookRelayArn}, not both.
+   */
+  readonly identityLinkingHookUrl?: string;
+  /** Secrets Manager ARN of the shared secret used to authenticate to the hook. Not used with a relay. */
   readonly identityLinkingHookSecretArn?: string;
+  /**
+   * ARN of a Lambda (a {@link HookRelay}, normally its `invokeTargetArn`) that the issuance
+   * endpoint invokes with `lambda:Invoke` instead of calling {@link identityLinkingHookUrl}. The
+   * relay runs in a VPC and calls a private hook, so the hook need not be reachable from the
+   * internet. The issuance role is granted `lambda:InvokeFunction` on exactly this ARN. Pass the
+   * alias ARN when the relay has provisioned concurrency. This is a string, not a function object,
+   * so it can be read from an SSM parameter written in the relay's region.
+   *
+   * With a relay, the shared hook secret is not used: do not set
+   * {@link identityLinkingHookSecretArn}.
+   * @default undefined (the hook is called at {@link identityLinkingHookUrl})
+   */
+  readonly identityLinkingHookRelayArn?: string;
+  /**
+   * Region of the relay function. Taken from {@link identityLinkingHookRelayArn} when that is a
+   * literal ARN; required when it is a deploy-time value.
+   * @default parsed from the ARN
+   */
+  readonly identityLinkingHookRelayRegion?: string;
+  /**
+   * How long the issuance endpoint waits for the relay, seconds. Keep it above a cold start of the
+   * relay in a VPC.
+   * @default 3
+   */
+  readonly identityLinkingHookRelayTimeoutSeconds?: number;
   /**
    * Secrets Manager ARN of the shared bearer secret the Scope Resolver call
    * authenticates with. When set, the session-issuance Lambda's role is granted
@@ -176,6 +204,31 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       throw new Error('defaultBehavior and certificate are required when creating a distribution');
     }
 
+    // The hook is reached by URL or through a relay Lambda: exactly one.
+    const relayArn = props.identityLinkingHookRelayArn;
+    if (relayArn && props.identityLinkingHookUrl) {
+      throw new Error('Set identityLinkingHookUrl or identityLinkingHookRelayArn, not both');
+    }
+    if (!relayArn && !props.identityLinkingHookUrl) {
+      throw new Error('identityLinkingHookUrl or identityLinkingHookRelayArn is required');
+    }
+    if (relayArn && props.identityLinkingHookSecretArn) {
+      throw new Error('identityLinkingHookSecretArn is not used with identityLinkingHookRelayArn');
+    }
+    let relayRegion: string | undefined;
+    if (relayArn) {
+      relayRegion = props.identityLinkingHookRelayRegion;
+      if (!relayRegion) {
+        if (core.Token.isUnresolved(relayArn)) {
+          throw new Error('identityLinkingHookRelayRegion is required when identityLinkingHookRelayArn is a deploy-time value');
+        }
+        relayRegion = relayArn.split(':')[3];
+        if (!relayRegion) {
+          throw new Error(`identityLinkingHookRelayArn is not a Lambda ARN: ${relayArn}`);
+        }
+      }
+    }
+
     const p = props.authSsmParamPrefix;
     const configSecretArn = ssm.StringParameter.valueForStringParameter(this, `${p}/configSecretArn`);
     const kmsKeyArn = ssm.StringParameter.valueForStringParameter(this, `${p}/kmsKeyArn`);
@@ -211,8 +264,15 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
       secretName: extraConfigSecretName,
       secretObjectValue: {
         kvs_arn: core.SecretValue.unsafePlainText(kvsArn),
-        post_auth_hook_url: core.SecretValue.unsafePlainText(props.identityLinkingHookUrl),
+        post_auth_hook_url: core.SecretValue.unsafePlainText(props.identityLinkingHookUrl ?? ''),
         post_auth_hook_secret_arn: core.SecretValue.unsafePlainText(props.identityLinkingHookSecretArn ?? ''),
+        // Only with a relay: nothing is added to the secret otherwise.
+        ...(relayArn ? {
+          post_auth_hook_relay_arn: core.SecretValue.unsafePlainText(relayArn),
+          post_auth_hook_relay_region: core.SecretValue.unsafePlainText(relayRegion!),
+          post_auth_hook_relay_timeout: core.SecretValue.unsafePlainText(
+            String(props.identityLinkingHookRelayTimeoutSeconds ?? 3)),
+        } : {}),
       },
       description: `Custom-UI auth config overrides for ${canonicalDomain}`,
     });
@@ -302,6 +362,14 @@ export class CognitoCustomUiAuth<TRole extends string = string> extends construc
     // Lambda@Edge code limit.
     const issuanceRole = edgeRole('IssuanceRole');
     grantCommon(issuanceRole, { kms: true, ddb: true, kvs: false, cognito: false, hookSecret: true, resolverSecret: true });
+    if (relayArn) {
+      // The one function the issuance endpoint may invoke. Nothing is granted on a wildcard.
+      issuanceRole.addToPrincipalPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['lambda:InvokeFunction'],
+        resources: [relayArn],
+      }));
+    }
     const issuanceFn = this.makeEdgeFunction('SessionIssuance', 'cognito-customui-session', configPy, issuanceRole, 'cognito-customui-session');
 
     // Refresh + logout Lambdas (boto3 only — no bundled deps).
