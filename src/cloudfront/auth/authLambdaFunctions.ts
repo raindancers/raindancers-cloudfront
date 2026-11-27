@@ -107,8 +107,15 @@ export class AuthLambdaFunctions extends constructs.Construct {
 
     props.configSecret.grantRead(this.copySecretLambda);
     props.kmsKey.grantDecrypt(this.copySecretLambda);
+    // GetKey: the handler reads jwt.secret to keep it as jwt.secret.old, then reads it back after the
+    // write to check it matches Secrets Manager (#73). Without GetKey that check raises AccessDenied
+    // and every Update of the custom resource fails.
     this.copySecretLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['cloudfront-keyvaluestore:PutKey', 'cloudfront-keyvaluestore:DescribeKeyValueStore'],
+      actions: [
+        'cloudfront-keyvaluestore:GetKey',
+        'cloudfront-keyvaluestore:PutKey',
+        'cloudfront-keyvaluestore:DescribeKeyValueStore',
+      ],
       resources: [props.kvs.keyValueStoreArn],
     }));
 
